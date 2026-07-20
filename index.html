@@ -21,6 +21,7 @@
     <!-- Html5Qrcode for scanning -->
     <script src="https://unpkg.com/html5-qrcode" type="text/javascript"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
 
     <style>
         @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&display=swap');
@@ -139,6 +140,34 @@
     <div id="root" class="flex-grow flex flex-col"></div>
 
     <script type="text/babel">
+        // ---------------------------------------------------------------
+        // Google Translate rewrites text nodes directly in the DOM. When
+        // React later tries to reconcile/remove those same nodes it can
+        // throw "Failed to execute 'removeChild'/'insertBefore' on 'Node'"
+        // which crashes the whole app to a blank screen. This patch makes
+        // those two calls no-ops instead of throwing when the node is no
+        // longer where React expects it, so translation can never take
+        // the app down.
+        (function protectDomFromTranslate() {
+            if (typeof Node !== 'function' || !Node.prototype) return;
+            const originalRemoveChild = Node.prototype.removeChild;
+            Node.prototype.removeChild = function (child) {
+                if (child.parentNode !== this) {
+                    if (window.console) console.warn('[translate-guard] skipped removeChild on detached node');
+                    return child;
+                }
+                return originalRemoveChild.apply(this, arguments);
+            };
+            const originalInsertBefore = Node.prototype.insertBefore;
+            Node.prototype.insertBefore = function (newNode, referenceNode) {
+                if (referenceNode && referenceNode.parentNode !== this) {
+                    if (window.console) console.warn('[translate-guard] skipped insertBefore on detached node');
+                    return newNode;
+                }
+                return originalInsertBefore.apply(this, arguments);
+            };
+        })();
+
         const defaultUsers = [
             { id: 'u1', email: 'admin@ngo.com', pass: 'admin123', role: 'Admin', name: 'Super Admin' },
             { id: 'u2', email: 'vol@ngo.com', pass: 'vol123', role: 'Volunteer', name: 'Main Volunteer' },
@@ -156,6 +185,132 @@
                 return defaultValue;
             }
         };
+
+        // Buckets patients into age groups and renders a 3D-style column
+        // chart (matching the look of a native Excel 3D column chart) onto
+        // an offscreen canvas, returning it as PNG bytes. Kept dependency
+        // free (no chart library) so it works purely off the Canvas API.
+        function buildAgeDistributionChartPng(patients) {
+            const groups = [
+                { label: '0-18', min: 0, max: 18 },
+                { label: '19-35', min: 19, max: 35 },
+                { label: '36-55', min: 36, max: 55 },
+                { label: '56+', min: 56, max: Infinity }
+            ];
+            const counts = groups.map(g => ({
+                label: g.label,
+                count: patients.filter(p => {
+                    const age = Number(p.age);
+                    return !isNaN(age) && age >= g.min && age <= g.max;
+                }).length
+            }));
+
+            const width = 640, height = 420;
+            const canvas = document.createElement('canvas');
+            canvas.width = width;
+            canvas.height = height;
+            const ctx = canvas.getContext('2d');
+
+            // Background
+            ctx.fillStyle = '#ffffff';
+            ctx.fillRect(0, 0, width, height);
+
+            // Title
+            ctx.fillStyle = '#404040';
+            ctx.font = 'bold 18px Arial';
+            ctx.textAlign = 'center';
+            ctx.fillText('Patient Age Distribution', width / 2, 34);
+
+            const plotLeft = 70, plotRight = width - 40, plotTop = 65, plotBottom = height - 70;
+            const plotHeight = plotBottom - plotTop;
+            const maxCount = Math.max(1, ...counts.map(c => c.count));
+            // Round the axis max up to a "nice" step (5/10/20/50...) like Excel does.
+            const niceMax = (() => {
+                const rough = maxCount <= 5 ? 5 : Math.ceil(maxCount / 5) * 5;
+                return rough;
+            })();
+            const gridSteps = 5;
+
+            // Gridlines + Y axis labels
+            ctx.strokeStyle = '#d9d9d9';
+            ctx.fillStyle = '#595959';
+            ctx.font = '12px Arial';
+            ctx.textAlign = 'right';
+            ctx.lineWidth = 1;
+            for (let i = 0; i <= gridSteps; i++) {
+                const value = Math.round((niceMax / gridSteps) * i);
+                const y = plotBottom - (plotHeight * i) / gridSteps;
+                ctx.beginPath();
+                ctx.moveTo(plotLeft, y);
+                ctx.lineTo(plotRight, y);
+                ctx.stroke();
+                ctx.fillText(String(value), plotLeft - 10, y + 4);
+            }
+
+            // Bars (with a simple pseudo-3D top + side face)
+            const depth = 12; // 3D extrusion depth in px
+            const groupWidth = (plotRight - plotLeft) / counts.length;
+            const barWidth = groupWidth * 0.5;
+
+            counts.forEach((c, i) => {
+                const barHeight = (c.count / niceMax) * plotHeight;
+                const x = plotLeft + i * groupWidth + (groupWidth - barWidth) / 2;
+                const yTop = plotBottom - barHeight;
+
+                // Front face
+                const gradient = ctx.createLinearGradient(x, yTop, x, plotBottom);
+                gradient.addColorStop(0, '#7fadde');
+                gradient.addColorStop(1, '#4a7fc1');
+                ctx.fillStyle = gradient;
+                ctx.fillRect(x, yTop, barWidth, barHeight);
+
+                // Top face (parallelogram, gives the 3D look)
+                ctx.fillStyle = '#a9c8e8';
+                ctx.beginPath();
+                ctx.moveTo(x, yTop);
+                ctx.lineTo(x + depth, yTop - depth);
+                ctx.lineTo(x + barWidth + depth, yTop - depth);
+                ctx.lineTo(x + barWidth, yTop);
+                ctx.closePath();
+                ctx.fill();
+
+                // Side face
+                ctx.fillStyle = '#3a6494';
+                ctx.beginPath();
+                ctx.moveTo(x + barWidth, yTop);
+                ctx.lineTo(x + barWidth + depth, yTop - depth);
+                ctx.lineTo(x + barWidth + depth, plotBottom - depth);
+                ctx.lineTo(x + barWidth, plotBottom);
+                ctx.closePath();
+                ctx.fill();
+
+                // Value label above bar
+                ctx.fillStyle = '#404040';
+                ctx.font = 'bold 13px Arial';
+                ctx.textAlign = 'center';
+                ctx.fillText(String(c.count), x + barWidth / 2, yTop - depth - 8);
+
+                // Category label on X axis
+                ctx.font = '12px Arial';
+                ctx.fillText(c.label, x + barWidth / 2, plotBottom + 20);
+            });
+
+            // Axis lines
+            ctx.strokeStyle = '#a6a6a6';
+            ctx.lineWidth = 1.5;
+            ctx.beginPath();
+            ctx.moveTo(plotLeft, plotTop - 10);
+            ctx.lineTo(plotLeft, plotBottom);
+            ctx.lineTo(plotRight, plotBottom);
+            ctx.stroke();
+
+            const dataUrl = canvas.toDataURL('image/png');
+            const base64 = dataUrl.split(',')[1];
+            const binary = atob(base64);
+            const bytes = new Uint8Array(binary.length);
+            for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+            return { bytes, counts };
+        }
 
         function MessageBox({ message, type, onClose }) {
             if (!message) return null;
@@ -230,35 +385,79 @@
             { code: 'te', label: 'Telugu' }
         ];
 
+        // Sets the cookie Google's widget itself uses to remember the chosen
+        // language. Setting it ourselves (in addition to driving the select
+        // box) means translation still applies even in cases where the
+        // combo box swap alone doesn't stick, and it survives a refresh.
+        function setGoogTransCookie(langCode) {
+            const value = langCode === 'en' ? '' : `/en/${langCode}`;
+            const hostname = window.location.hostname;
+            [
+                `googtrans=${value};path=/`,
+                `googtrans=${value};path=/;domain=${hostname}`,
+                `googtrans=${value};path=/;domain=.${hostname}`
+            ].forEach(cookieStr => { document.cookie = cookieStr; });
+        }
+
         function GoogleTranslate() {
             const [selectedLang, setSelectedLang] = React.useState('en');
+            const [status, setStatus] = React.useState('loading'); // loading | ready | error
+
+            React.useEffect(() => {
+                let cancelled = false;
+                let attempts = 0;
+                const maxAttempts = 100; // ~20s, generous for slow connections
+                const interval = setInterval(() => {
+                    if (cancelled) return;
+                    attempts += 1;
+                    const combo = document.querySelector('#google_translate_element select.goog-te-combo') || document.querySelector('.goog-te-combo');
+                    if (combo && combo.options && combo.options.length > 1) {
+                        setStatus('ready');
+                        clearInterval(interval);
+                    } else if (attempts >= maxAttempts) {
+                        setStatus('error');
+                        clearInterval(interval);
+                    }
+                }, 200);
+                return () => { cancelled = true; clearInterval(interval); };
+            }, []);
 
             const applyLanguage = (langCode) => {
                 setSelectedLang(langCode);
+                setGoogTransCookie(langCode);
+
                 let attempts = 0;
-                const interval = setInterval(() => {
+                const trigger = () => {
                     attempts += 1;
                     const combo = document.querySelector('#google_translate_element select.goog-te-combo') || document.querySelector('.goog-te-combo');
                     if (combo) {
                         combo.value = langCode;
                         combo.dispatchEvent(new Event('change', { bubbles: true }));
-                        clearInterval(interval);
-                    } else if (attempts > 50) {
-                        // Widget never initialized (blocked script, offline, etc.) — give up quietly.
-                        clearInterval(interval);
+                        return true;
                     }
+                    return false;
+                };
+
+                if (trigger()) return;
+
+                // Widget wasn't ready yet (rare race on first click) — keep
+                // retrying briefly instead of silently doing nothing.
+                const interval = setInterval(() => {
+                    attempts += 1;
+                    if (trigger() || attempts > 50) clearInterval(interval);
                 }, 150);
             };
 
             return (
                 <div className="flex items-center justify-center mt-2 md:mt-0">
-                    <div className="lang-select-box notranslate shadow-sm">
-                        <i className="fa-solid fa-globe text-emerald-600 dark:text-emerald-400"></i>
+                    <div className="lang-select-box notranslate shadow-sm" title={status === 'error' ? 'Translation service unavailable — check your internet connection' : ''}>
+                        <i className={`fa-solid ${status === 'error' ? 'fa-triangle-exclamation text-amber-500' : 'fa-globe text-emerald-600 dark:text-emerald-400'}`}></i>
                         <span className="hidden sm:inline text-xs font-bold text-slate-500 dark:text-slate-400">Language:</span>
                         <select
                             value={selectedLang}
                             onChange={(e) => applyLanguage(e.target.value)}
                             aria-label="Select language"
+                            disabled={status !== 'ready'}
                         >
                             {LANGUAGE_OPTIONS.map(l => (
                                 <option key={l.code} value={l.code}>{l.label}</option>
@@ -447,7 +646,7 @@
             }, [patients, dbStatusType]);
 
             React.useEffect(() => {
-                if (!window.googleTranslateElementInit) {
+                const loadTranslateScript = () => {
                     window.googleTranslateElementInit = () => {
                         new window.google.translate.TranslateElement({
                             pageLanguage: 'en',
@@ -456,9 +655,22 @@
                         }, 'google_translate_element');
                     };
                     const script = document.createElement('script');
-                    script.src = "//translate.google.com/translate_a/element.js?cb=googleTranslateElementInit";
+                    script.src = "https://translate.google.com/translate_a/element.js?cb=googleTranslateElementInit";
                     script.async = true;
+                    script.onerror = () => {
+                        // One retry after a short delay covers transient
+                        // network blips without looping forever.
+                        if (!window.__translateRetried) {
+                            window.__translateRetried = true;
+                            script.remove();
+                            setTimeout(loadTranslateScript, 2000);
+                        }
+                    };
                     document.body.appendChild(script);
+                };
+
+                if (!document.querySelector('script[src*="translate.google.com/translate_a/element.js"]')) {
+                    loadTranslateScript();
                 }
             }, []);
 
@@ -815,7 +1027,7 @@
             const genderTotalBase = Math.max(1, totalPatients);
             const doctorTotalBase = Math.max(1, totalPatients);
 
-            const generateCsvReport = () => {
+            const generateCsvReport = async () => {
                 if (typeof XLSX === 'undefined') {
                     showMsg("Report library still loading, please try again in a moment.", "error");
                     return;
@@ -827,7 +1039,18 @@
                     const registeredAt = p.timestamp ? new Date(p.timestamp).toLocaleString() : '';
                     return [p.id, p.name, p.age ? Number(p.age) : '', p.gender, p.symptoms, p.status, doctorName, p.prescription || '', registeredAt];
                 });
-                const sheetData = [headers, ...rows];
+
+                // Age summary table + chart get appended a couple of rows below
+                // the patient data, same layout as a manually-built camp report.
+                const { bytes: chartPngBytes, counts: ageCounts } = buildAgeDistributionChartPng(patients);
+                const summaryStartRow = rows.length + 3; // 0-indexed row the "Age Group" header lands on
+                const sheetData = [
+                    headers,
+                    ...rows,
+                    [],
+                    ['Age Group', 'Patient Count'],
+                    ...ageCounts.map(c => [c.label, c.count])
+                ];
 
                 // Build the worksheet directly from the array-of-arrays so every row
                 // lines up under the correct header column.
@@ -845,12 +1068,98 @@
 
                 // Freeze the header row so column titles stay visible while scrolling.
                 worksheet['!freeze'] = { xSplit: 0, ySplit: 1 };
-                worksheet['!autofilter'] = { ref: `A1:${XLSX.utils.encode_col(headers.length - 1)}${sheetData.length}` };
+                worksheet['!autofilter'] = { ref: `A1:${XLSX.utils.encode_col(headers.length - 1)}${rows.length + 1}` };
 
                 const workbook = XLSX.utils.book_new();
                 XLSX.utils.book_append_sheet(workbook, worksheet, 'Patients');
-                XLSX.writeFile(workbook, `CareNet_Camp_Report_${new Date().toISOString().slice(0,10)}.xlsx`);
-                showMsg("Report downloaded successfully.", "success");
+                const baseArrayBuffer = XLSX.write(workbook, { type: 'array', bookType: 'xlsx' });
+                const fileName = `CareNet_Camp_Report_${new Date().toISOString().slice(0, 10)}.xlsx`;
+
+                // SheetJS's free build can create the spreadsheet but can't write
+                // native chart objects, so the chart is rendered to PNG above and
+                // spliced into the .xlsx package here as a real embedded picture
+                // (this is standard OOXML — Excel/Google Sheets/LibreOffice all
+                // open it as a normal image, positioned right under the summary
+                // table, same as the reference report).
+                if (typeof JSZip === 'undefined') {
+                    XLSX.writeFile(workbook, fileName);
+                    showMsg("Report downloaded (chart image skipped — chart library unavailable).", "info");
+                    return;
+                }
+
+                try {
+                    const zip = await JSZip.loadAsync(baseArrayBuffer);
+
+                    zip.file('xl/media/image1.png', chartPngBytes);
+
+                    const EMU_PER_PX = 9525;
+                    const chartPxWidth = 640, chartPxHeight = 420;
+                    const widthEmu = chartPxWidth * EMU_PER_PX;
+                    const heightEmu = chartPxHeight * EMU_PER_PX;
+                    const anchorRow = summaryStartRow + ageCounts.length + 2; // a couple rows below the summary table
+
+                    const drawingXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <xdr:oneCellAnchor>
+    <xdr:from><xdr:col>0</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>${anchorRow}</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from>
+    <xdr:ext cx="${widthEmu}" cy="${heightEmu}"/>
+    <xdr:pic>
+      <xdr:nvPicPr>
+        <xdr:cNvPr id="2" name="AgeDistributionChart"/>
+        <xdr:cNvPicPr><a:picLocks noChangeAspect="1"/></xdr:cNvPicPr>
+      </xdr:nvPicPr>
+      <xdr:blipFill>
+        <a:blip r:embed="rId1"/>
+        <a:stretch><a:fillRect/></a:stretch>
+      </xdr:blipFill>
+      <xdr:spPr>
+        <a:xfrm><a:off x="0" y="0"/><a:ext cx="${widthEmu}" cy="${heightEmu}"/></a:xfrm>
+        <a:prstGeom prst="rect"><a:avLst/></a:prstGeom>
+      </xdr:spPr>
+    </xdr:pic>
+    <xdr:clientData/>
+  </xdr:oneCellAnchor>
+</xdr:wsDr>`;
+                    zip.file('xl/drawings/drawing1.xml', drawingXml);
+
+                    zip.file('xl/drawings/_rels/drawing1.xml.rels', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/image1.png"/>
+</Relationships>`);
+
+                    zip.file('xl/worksheets/_rels/sheet1.xml.rels', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing" Target="../drawings/drawing1.xml"/>
+</Relationships>`);
+
+                    let sheetXml = await zip.file('xl/worksheets/sheet1.xml').async('string');
+                    sheetXml = sheetXml.replace('</worksheet>', '<drawing r:id="rId1"/></worksheet>');
+                    zip.file('xl/worksheets/sheet1.xml', sheetXml);
+
+                    let contentTypesXml = await zip.file('[Content_Types].xml').async('string');
+                    if (!contentTypesXml.includes('/xl/drawings/drawing1.xml')) {
+                        contentTypesXml = contentTypesXml.replace(
+                            '</Types>',
+                            '<Override PartName="/xl/drawings/drawing1.xml" ContentType="application/vnd.openxmlformats-officedocument.drawing+xml"/></Types>'
+                        );
+                    }
+                    zip.file('[Content_Types].xml', contentTypesXml);
+
+                    const finalBlob = await zip.generateAsync({ type: 'blob' });
+                    const url = URL.createObjectURL(finalBlob);
+                    const link = document.createElement('a');
+                    link.href = url;
+                    link.download = fileName;
+                    document.body.appendChild(link);
+                    link.click();
+                    document.body.removeChild(link);
+                    URL.revokeObjectURL(url);
+                    showMsg("Report with age distribution chart downloaded successfully.", "success");
+                } catch (err) {
+                    console.error('Chart embedding failed, falling back to data-only report', err);
+                    XLSX.writeFile(workbook, fileName);
+                    showMsg("Report downloaded (chart image couldn't be embedded).", "info");
+                }
             };
 
             return (

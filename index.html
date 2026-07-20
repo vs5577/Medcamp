@@ -20,6 +20,7 @@
     
     <!-- Html5Qrcode for scanning -->
     <script src="https://unpkg.com/html5-qrcode" type="text/javascript"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 
     <style>
         @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&display=swap');
@@ -91,10 +92,20 @@
         .dark .goog-te-gadget-simple span { color: #f1f5f9 !important; }
         .goog-te-gadget-icon { display: none !important; } 
 
-        /* Custom compact language switcher: hide Google's default widget entirely,
-           we drive the hidden .goog-te-combo select from our own styled dropdown. */
-        #google_translate_element { display: none !important; }
+        /* Custom compact language switcher: keep Google's default widget in the DOM
+           and technically "visible" (display:none breaks its init/combo-select in
+           some browsers) but tucked off-screen, since we drive it from our own
+           styled dropdown instead. */
+        #google_translate_element {
+            position: absolute !important;
+            top: -9999px !important;
+            left: -9999px !important;
+            height: 1px !important;
+            width: 1px !important;
+            overflow: hidden !important;
+        }
         .goog-te-banner-frame { display: none !important; }
+        body > .skiptranslate { display: none !important; }
 
         .lang-select-box {
             background-color: #f8fafc;
@@ -227,15 +238,16 @@
                 let attempts = 0;
                 const interval = setInterval(() => {
                     attempts += 1;
-                    const combo = document.querySelector('.goog-te-combo');
+                    const combo = document.querySelector('#google_translate_element select.goog-te-combo') || document.querySelector('.goog-te-combo');
                     if (combo) {
                         combo.value = langCode;
-                        combo.dispatchEvent(new Event('change'));
+                        combo.dispatchEvent(new Event('change', { bubbles: true }));
                         clearInterval(interval);
-                    } else if (attempts > 30) {
+                    } else if (attempts > 50) {
+                        // Widget never initialized (blocked script, offline, etc.) — give up quietly.
                         clearInterval(interval);
                     }
-                }, 100);
+                }, 150);
             };
 
             return (
@@ -779,9 +791,12 @@
             const inQueueCount = patients.filter(p => p.status === 'In Queue').length;
             const awaitingCount = patients.filter(p => p.status === 'Awaiting Volunteer').length;
             const prescribedCount = patients.filter(p => p.status === 'Prescribed').length;
+            const genderColorMap = { Male: { color: 'bg-blue-500', hex: '#3b82f6' }, Female: { color: 'bg-pink-500', hex: '#ec4899' }, Other: { color: 'bg-purple-500', hex: '#a855f7' } };
             const genderBreakdown = ['Male', 'Female', 'Other'].map(g => ({
                 label: g,
-                count: patients.filter(p => (p.gender || '').toLowerCase() === g.toLowerCase()).length
+                count: patients.filter(p => (p.gender || '').toLowerCase() === g.toLowerCase()).length,
+                color: genderColorMap[g].color,
+                hex: genderColorMap[g].hex
             }));
             const doctorBreakdown = users.filter(u => u.role === 'Doctor').map(doc => ({
                 label: doc.name,
@@ -793,28 +808,48 @@
                 { label: 'Prescribed', count: prescribedCount, color: 'bg-rose-500', hex: '#f43f5e' },
                 { label: 'Completed', count: attendedCount, color: 'bg-emerald-500', hex: '#10b981' }
             ];
-            const maxStatusCount = Math.max(1, ...statusBreakdown.map(s => s.count));
-            const maxDoctorCount = Math.max(1, ...doctorBreakdown.map(d => d.count));
-            const maxGenderCount = Math.max(1, ...genderBreakdown.map(g => g.count));
+            // Bars are filled as a true percentage of the whole (not relative to
+            // whichever category happens to be largest), so a count of 2 out of 4
+            // patients shows as a half-filled bar instead of a full one.
+            const statusTotalBase = Math.max(1, totalPatients);
+            const genderTotalBase = Math.max(1, totalPatients);
+            const doctorTotalBase = Math.max(1, totalPatients);
 
             const generateCsvReport = () => {
+                if (typeof XLSX === 'undefined') {
+                    showMsg("Report library still loading, please try again in a moment.", "error");
+                    return;
+                }
+
                 const headers = ['Patient ID', 'Name', 'Age', 'Gender', 'Symptoms', 'Status', 'Assigned Doctor', 'Prescription', 'Registered At'];
                 const rows = patients.map(p => {
                     const doctorName = users.find(u => u.id === p.assignedDoctor)?.name || '';
                     const registeredAt = p.timestamp ? new Date(p.timestamp).toLocaleString() : '';
-                    const escape = (val) => `"${String(val ?? '').replace(/"/g, '""')}"`;
-                    return [p.id, p.name, p.age, p.gender, p.symptoms, p.status, doctorName, p.prescription, registeredAt].map(escape).join(',');
+                    return [p.id, p.name, p.age ? Number(p.age) : '', p.gender, p.symptoms, p.status, doctorName, p.prescription || '', registeredAt];
                 });
-                const csvContent = [headers.join(','), ...rows].join('\n');
-                const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
-                const url = URL.createObjectURL(blob);
-                const link = document.createElement('a');
-                link.href = url;
-                link.download = `CareNet_Camp_Report_${new Date().toISOString().slice(0,10)}.csv`;
-                document.body.appendChild(link);
-                link.click();
-                document.body.removeChild(link);
-                URL.revokeObjectURL(url);
+                const sheetData = [headers, ...rows];
+
+                // Build the worksheet directly from the array-of-arrays so every row
+                // lines up under the correct header column.
+                const worksheet = XLSX.utils.aoa_to_sheet(sheetData);
+
+                // Auto-fit each column to its widest value (header or data) so nothing
+                // gets clipped or left with huge empty gaps like a raw CSV does.
+                worksheet['!cols'] = headers.map((header, colIndex) => {
+                    const longest = sheetData.reduce((max, row) => {
+                        const cellText = row[colIndex] != null ? String(row[colIndex]) : '';
+                        return Math.max(max, cellText.length);
+                    }, header.length);
+                    return { wch: Math.min(Math.max(longest + 2, 10), 40) };
+                });
+
+                // Freeze the header row so column titles stay visible while scrolling.
+                worksheet['!freeze'] = { xSplit: 0, ySplit: 1 };
+                worksheet['!autofilter'] = { ref: `A1:${XLSX.utils.encode_col(headers.length - 1)}${sheetData.length}` };
+
+                const workbook = XLSX.utils.book_new();
+                XLSX.utils.book_append_sheet(workbook, worksheet, 'Patients');
+                XLSX.writeFile(workbook, `CareNet_Camp_Report_${new Date().toISOString().slice(0,10)}.xlsx`);
                 showMsg("Report downloaded successfully.", "success");
             };
 
@@ -1282,10 +1317,10 @@
                                                                             <span className="w-2.5 h-2.5 rounded-full inline-block" style={{ backgroundColor: s.hex }}></span>
                                                                             {s.label}
                                                                         </span>
-                                                                        <span className="text-slate-500">{s.count}</span>
+                                                                        <span className="text-slate-500">{s.count} <span className="text-slate-400 font-semibold">({Math.round((s.count / statusTotalBase) * 100)}%)</span></span>
                                                                     </div>
                                                                     <div className="w-full h-3 bg-slate-100 dark:bg-slate-700 rounded-full overflow-hidden">
-                                                                        <div className={`h-full ${s.color} rounded-full transition-all duration-500`} style={{ width: `${(s.count / maxStatusCount) * 100}%` }}></div>
+                                                                        <div className={`h-full ${s.color} rounded-full transition-all duration-500`} style={{ width: `${(s.count / statusTotalBase) * 100}%` }}></div>
                                                                     </div>
                                                                 </div>
                                                             ))}
@@ -1297,20 +1332,29 @@
                                             {/* Gender Breakdown */}
                                             <div className="bg-white dark:bg-slate-800 p-6 rounded-2xl border dark:border-slate-700 shadow-sm">
                                                 <h3 className="font-bold text-lg mb-5 flex items-center"><i className="fa-solid fa-venus-mars mr-2 text-blue-500"></i> Gender Breakdown</h3>
-                                                <div className="space-y-4">
-                                                    {genderBreakdown.map(g => (
-                                                        <div key={g.label}>
-                                                            <div className="flex justify-between text-xs font-bold mb-1">
-                                                                <span className="text-slate-600 dark:text-slate-300">{g.label}</span>
-                                                                <span className="text-slate-500">{g.count}</span>
-                                                            </div>
-                                                            <div className="w-full h-3 bg-slate-100 dark:bg-slate-700 rounded-full overflow-hidden">
-                                                                <div className="h-full bg-blue-500 rounded-full transition-all duration-500" style={{ width: `${(g.count / maxGenderCount) * 100}%` }}></div>
-                                                            </div>
+                                                {totalPatients === 0 ? (
+                                                    <p className="text-sm text-slate-400 italic text-center py-4">No patient data yet.</p>
+                                                ) : (
+                                                    <div className="flex flex-col sm:flex-row items-center gap-6">
+                                                        <DonutChart segments={genderBreakdown} />
+                                                        <div className="w-full flex-1 space-y-4">
+                                                            {genderBreakdown.map(g => (
+                                                                <div key={g.label}>
+                                                                    <div className="flex justify-between text-xs font-bold mb-1">
+                                                                        <span className="text-slate-600 dark:text-slate-300 flex items-center gap-1.5">
+                                                                            <span className="w-2.5 h-2.5 rounded-full inline-block" style={{ backgroundColor: g.hex }}></span>
+                                                                            {g.label}
+                                                                        </span>
+                                                                        <span className="text-slate-500">{g.count} <span className="text-slate-400 font-semibold">({Math.round((g.count / genderTotalBase) * 100)}%)</span></span>
+                                                                    </div>
+                                                                    <div className="w-full h-3 bg-slate-100 dark:bg-slate-700 rounded-full overflow-hidden">
+                                                                        <div className={`h-full ${g.color} rounded-full transition-all duration-500`} style={{ width: `${(g.count / genderTotalBase) * 100}%` }}></div>
+                                                                    </div>
+                                                                </div>
+                                                            ))}
                                                         </div>
-                                                    ))}
-                                                    {totalPatients === 0 && <p className="text-sm text-slate-400 italic text-center py-4">No patient data yet.</p>}
-                                                </div>
+                                                    </div>
+                                                )}
                                             </div>
                                         </div>
 
@@ -1322,10 +1366,10 @@
                                                     <div key={d.label}>
                                                         <div className="flex justify-between text-xs font-bold mb-1">
                                                             <span className="text-slate-600 dark:text-slate-300">{d.label}</span>
-                                                            <span className="text-slate-500">{d.count}</span>
+                                                            <span className="text-slate-500">{d.count} <span className="text-slate-400 font-semibold">({Math.round((d.count / doctorTotalBase) * 100)}%)</span></span>
                                                         </div>
                                                         <div className="w-full h-3 bg-slate-100 dark:bg-slate-700 rounded-full overflow-hidden">
-                                                            <div className="h-full bg-rose-500 rounded-full transition-all duration-500" style={{ width: `${(d.count / maxDoctorCount) * 100}%` }}></div>
+                                                            <div className="h-full bg-rose-500 rounded-full transition-all duration-500" style={{ width: `${(d.count / doctorTotalBase) * 100}%` }}></div>
                                                         </div>
                                                     </div>
                                                 ))}
@@ -1340,14 +1384,14 @@
                                     <div className="space-y-6 animate-fade-in">
                                         <div className="bg-white dark:bg-slate-800 p-8 rounded-2xl border dark:border-slate-700 shadow-sm">
                                             <div className="flex items-center mb-4">
-                                                <div className="w-12 h-12 bg-emerald-100 dark:bg-emerald-900/30 text-emerald-600 dark:text-emerald-400 rounded-xl flex items-center justify-center text-xl mr-4"><i className="fa-solid fa-file-csv"></i></div>
+                                                <div className="w-12 h-12 bg-emerald-100 dark:bg-emerald-900/30 text-emerald-600 dark:text-emerald-400 rounded-xl flex items-center justify-center text-xl mr-4"><i className="fa-solid fa-file-excel"></i></div>
                                                 <div>
                                                     <h3 className="font-bold text-lg">Generate Full Camp Report</h3>
-                                                    <p className="text-sm text-slate-500">Download a complete CSV of every registered patient, their status, assigned doctor and prescription.</p>
+                                                    <p className="text-sm text-slate-500">Download a properly formatted Excel sheet of every registered patient, their status, assigned doctor and prescription — columns auto-sized and header row frozen.</p>
                                                 </div>
                                             </div>
                                             <button onClick={generateCsvReport} className="w-full sm:w-auto px-8 py-3.5 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-xl shadow-lg transition flex items-center justify-center gap-2">
-                                                <i className="fa-solid fa-download"></i> Download CSV Report
+                                                <i className="fa-solid fa-download"></i> Download Excel Report
                                             </button>
                                         </div>
 

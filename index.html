@@ -21,9 +21,6 @@
     <!-- Html5Qrcode for scanning -->
     <script src="https://unpkg.com/html5-qrcode" type="text/javascript"></script>
 
-    <!-- Chart.js for Admin Analytics -->
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
-
     <style>
         @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&display=swap');
         body { font-family: 'Inter', sans-serif; transition: background-color 0.3s, color 0.3s; }
@@ -85,24 +82,7 @@
             font-family: 'Inter', sans-serif !important;
             display: inline-flex !important;
             align-items: center !important;
-            transition: all 0.2s ease !important;
-            box-shadow: 0 1px 2px rgba(0,0,0,0.04) !important;
         }
-        .goog-te-gadget-simple:hover {
-            border-color: #10b981 !important;
-            box-shadow: 0 4px 10px rgba(16,185,129,0.15) !important;
-        }
-        .translate-wrap {
-            display: flex;
-            align-items: center;
-            gap: 0.5rem;
-            background: rgba(16,185,129,0.06);
-            padding: 0.35rem 0.6rem;
-            border-radius: 0.9rem;
-            border: 1px solid rgba(16,185,129,0.15);
-        }
-        .dark .translate-wrap { background: rgba(16,185,129,0.08); border-color: rgba(16,185,129,0.2); }
-        .translate-wrap i { color: #10b981; }
         .dark .goog-te-gadget-simple {
             background-color: #1e293b !important;
             border-color: #475569 !important;
@@ -110,6 +90,37 @@
         .goog-te-gadget-simple span { color: #0f172a !important; font-weight: 500 !important; }
         .dark .goog-te-gadget-simple span { color: #f1f5f9 !important; }
         .goog-te-gadget-icon { display: none !important; } 
+
+        /* Custom compact language switcher: hide Google's default widget entirely,
+           we drive the hidden .goog-te-combo select from our own styled dropdown. */
+        #google_translate_element { display: none !important; }
+        .goog-te-banner-frame { display: none !important; }
+
+        .lang-select-box {
+            background-color: #f8fafc;
+            border: 1px solid #cbd5e1;
+            border-radius: 0.75rem;
+            padding: 0.5rem 0.75rem;
+            display: inline-flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+        .dark .lang-select-box {
+            background-color: #1e293b;
+            border-color: #475569;
+        }
+        .lang-select-box select {
+            background: transparent;
+            border: none;
+            outline: none;
+            font-weight: 600;
+            font-size: 0.8rem;
+            color: #0f172a;
+            cursor: pointer;
+            padding-right: 0.25rem;
+        }
+        .dark .lang-select-box select { color: #f1f5f9; }
+        .lang-select-box select option { color: #0f172a; background-color: #ffffff; }
     </style>
 </head>
 <body class="bg-slate-50 dark:bg-slate-900 text-slate-800 dark:text-slate-100 min-h-screen flex flex-col">
@@ -152,7 +163,15 @@
         }
 
         function QRScanner({ onScan, title, onCancel }) {
+            // BUG FIX: previously scanner.clear() could be called twice —
+            // once inside the successful-scan callback and once again in the
+            // effect cleanup on unmount — which threw noisy console errors
+            // ("cannot clear while scan is not running"). A ref flag now
+            // guarantees clear() only ever runs once per scanner instance.
+            const clearedRef = React.useRef(false);
+
             React.useEffect(() => {
+                clearedRef.current = false;
                 const scanner = new Html5QrcodeScanner("reader", { 
                     fps: 10, 
                     qrbox: { width: 250, height: 250 },
@@ -163,14 +182,20 @@
                 
                 scanner.render(
                     (decodedText) => {
-                        scanner.clear();
+                        if (!clearedRef.current) {
+                            clearedRef.current = true;
+                            scanner.clear().catch(e => console.error("Scanner clean error:", e));
+                        }
                         onScan(decodedText);
                     },
                     (error) => { /* ignore normal loop frame scan errors */ }
                 );
                 
                 return () => {
-                    scanner.clear().catch(e => console.error("Scanner clean error:", e));
+                    if (!clearedRef.current) {
+                        clearedRef.current = true;
+                        scanner.clear().catch(e => console.error("Scanner clean error:", e));
+                    }
                 };
             }, [onScan]);
 
@@ -187,17 +212,97 @@
             );
         }
 
-        const GoogleTranslate = React.memo(() => {
+        const LANGUAGE_OPTIONS = [
+            { code: 'en', label: 'English' },
+            { code: 'ta', label: 'Tamil' },
+            { code: 'hi', label: 'Hindi' },
+            { code: 'te', label: 'Telugu' }
+        ];
+
+        function GoogleTranslate() {
+            const [selectedLang, setSelectedLang] = React.useState('en');
+
+            const applyLanguage = (langCode) => {
+                setSelectedLang(langCode);
+                let attempts = 0;
+                const interval = setInterval(() => {
+                    attempts += 1;
+                    const combo = document.querySelector('.goog-te-combo');
+                    if (combo) {
+                        combo.value = langCode;
+                        combo.dispatchEvent(new Event('change'));
+                        clearInterval(interval);
+                    } else if (attempts > 30) {
+                        clearInterval(interval);
+                    }
+                }, 100);
+            };
+
             return (
                 <div className="flex items-center justify-center mt-2 md:mt-0">
-                    <div className="translate-wrap">
-                        <i className="fa-solid fa-globe text-sm"></i>
-                        <span className="text-xs font-bold text-emerald-700 dark:text-emerald-400 hidden sm:inline">Language:</span>
-                        <div id="google_translate_element"></div>
+                    <div className="lang-select-box notranslate shadow-sm">
+                        <i className="fa-solid fa-globe text-emerald-600 dark:text-emerald-400"></i>
+                        <span className="hidden sm:inline text-xs font-bold text-slate-500 dark:text-slate-400">Language:</span>
+                        <select
+                            value={selectedLang}
+                            onChange={(e) => applyLanguage(e.target.value)}
+                            aria-label="Select language"
+                        >
+                            {LANGUAGE_OPTIONS.map(l => (
+                                <option key={l.code} value={l.code}>{l.label}</option>
+                            ))}
+                        </select>
+                    </div>
+                    <div id="google_translate_element"></div>
+                </div>
+            );
+        }
+
+        function DonutChart({ segments, size = 170, strokeWidth = 26 }) {
+            const total = segments.reduce((sum, s) => sum + s.count, 0);
+            const radius = (size - strokeWidth) / 2;
+            const circumference = 2 * Math.PI * radius;
+            let offsetAccum = 0;
+
+            return (
+                <div className="relative flex-shrink-0" style={{ width: size, height: size }}>
+                    <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`} className="-rotate-90">
+                        <circle
+                            cx={size / 2}
+                            cy={size / 2}
+                            r={radius}
+                            fill="none"
+                            stroke="currentColor"
+                            className="text-slate-100 dark:text-slate-700"
+                            strokeWidth={strokeWidth}
+                        />
+                        {total > 0 && segments.filter(s => s.count > 0).map((s, i) => {
+                            const dash = (s.count / total) * circumference;
+                            const dashArray = `${dash} ${circumference - dash}`;
+                            const dashOffset = -offsetAccum;
+                            offsetAccum += dash;
+                            return (
+                                <circle
+                                    key={i}
+                                    cx={size / 2}
+                                    cy={size / 2}
+                                    r={radius}
+                                    fill="none"
+                                    stroke={s.hex}
+                                    strokeWidth={strokeWidth}
+                                    strokeDasharray={dashArray}
+                                    strokeDashoffset={dashOffset}
+                                />
+                            );
+                        })}
+                    </svg>
+                    <div className="absolute inset-0 flex flex-col items-center justify-center">
+                        <span className="text-2xl font-extrabold text-slate-700 dark:text-slate-200">{total}</span>
+                        <span className="text-[10px] font-bold uppercase tracking-wide text-slate-400">Patients</span>
                     </div>
                 </div>
             );
-        }, () => true);
+        }
 
         function App() {
             // Data State
@@ -229,6 +334,7 @@
             const [scanningFor, setScanningFor] = React.useState(null);
             const [scannedPatient, setScannedPatient] = React.useState(null);
             const [billingPatient, setBillingPatient] = React.useState(null);
+            const [adminTab, setAdminTab] = React.useState('overview'); // overview | analytics | reports
 
             // Helpers
             const showMsg = (msg, type = 'info') => {
@@ -333,7 +439,7 @@
                     window.googleTranslateElementInit = () => {
                         new window.google.translate.TranslateElement({
                             pageLanguage: 'en',
-                            includedLanguages: 'ta,en',
+                            includedLanguages: 'ta,en,hi,te',
                             layout: window.google.translate.TranslateElement.InlineLayout.SIMPLE
                         }, 'google_translate_element');
                     };
@@ -470,18 +576,19 @@
                 setIsMobileMenuOpen(false);
             };
 
-            const handleRegisterAgain = () => {
-                setCurrentUser(null);
-                setMyPatientId(null);
-                setPatientAuthMode('signup');
-                setView('patient-login');
-                showMsg("Ready for a new registration. Please fill in your details.", 'info');
-                setIsMobileMenuOpen(false);
-            };
-
             const handleNavigation = (targetView) => {
                 setView(targetView);
                 setIsMobileMenuOpen(false);
+            };
+
+            // Patient chooses to register a fresh visit after their previous consultation is Completed.
+            // Sends them straight to the registration (signup) form so a brand new ticket + QR is generated.
+            const handleRegisterAgain = () => {
+                setMyPatientId(null);
+                setPatientAuthMode('signup');
+                setView('patient-login');
+                setIsMobileMenuOpen(false);
+                showMsg("Please fill the form below to register a new visit.", 'info');
             };
 
             const handleAddUser = (e) => {
@@ -637,30 +744,78 @@
                 }
             };
 
-            const collectPayment = async (e) => {
-                e.preventDefault();
-                const amount = e.target.amount.value;
-                
+            // Pharmacy is free of cost at the camp — no billing/payment is collected.
+            // Once medication is handed over, the visit is simply marked Completed
+            // and the prescription remains visible on the patient's own portal.
+            const completeDispense = async () => {
+                if (!billingPatient) return;
                 try {
                     if (db) {
                         const { doc, updateDoc } = await import("https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js");
                         const docRef = doc(db, 'artifacts', 'medcamp-6a0f8', 'public', 'data', 'patients', billingPatient.id);
                         await updateDoc(docRef, { 
-                            status: 'Completed', 
-                            billAmount: amount 
+                            status: 'Completed'
                         });
                     } else {
                         setPatients(prev => prev.map(p => 
-                            p.id === billingPatient.id ? { ...p, status: 'Completed', billAmount: amount } : p
+                            p.id === billingPatient.id ? { ...p, status: 'Completed' } : p
                         ));
                     }
                     
                     setBillingPatient(null);
-                    showMsg(`Payment of ₹${amount} logged. Medicines dispensed.`, 'success');
+                    showMsg(`Medication dispensed to ${billingPatient.name}. Visit completed — free of cost.`, 'success');
                 } catch (error) {
-                    showMsg("Error updating checkout status.", "error");
+                    showMsg("Error updating dispense status.", "error");
                     console.error(error);
                 }
+            };
+
+            // ---- Admin analytics helpers (derived purely from live patients/users data) ----
+            const volunteerCount = users.filter(u => u.role === 'Volunteer').length;
+            const doctorCount = users.filter(u => u.role === 'Doctor').length;
+            const pharmacyCount = users.filter(u => u.role === 'Pharmacy').length;
+            const totalPatients = patients.length;
+            const attendedCount = patients.filter(p => p.status === 'Completed').length;
+            const inQueueCount = patients.filter(p => p.status === 'In Queue').length;
+            const awaitingCount = patients.filter(p => p.status === 'Awaiting Volunteer').length;
+            const prescribedCount = patients.filter(p => p.status === 'Prescribed').length;
+            const genderBreakdown = ['Male', 'Female', 'Other'].map(g => ({
+                label: g,
+                count: patients.filter(p => (p.gender || '').toLowerCase() === g.toLowerCase()).length
+            }));
+            const doctorBreakdown = users.filter(u => u.role === 'Doctor').map(doc => ({
+                label: doc.name,
+                count: patients.filter(p => p.assignedDoctor === doc.id).length
+            }));
+            const statusBreakdown = [
+                { label: 'Awaiting Triage', count: awaitingCount, color: 'bg-slate-400', hex: '#94a3b8' },
+                { label: 'In Queue', count: inQueueCount, color: 'bg-indigo-500', hex: '#6366f1' },
+                { label: 'Prescribed', count: prescribedCount, color: 'bg-rose-500', hex: '#f43f5e' },
+                { label: 'Completed', count: attendedCount, color: 'bg-emerald-500', hex: '#10b981' }
+            ];
+            const maxStatusCount = Math.max(1, ...statusBreakdown.map(s => s.count));
+            const maxDoctorCount = Math.max(1, ...doctorBreakdown.map(d => d.count));
+            const maxGenderCount = Math.max(1, ...genderBreakdown.map(g => g.count));
+
+            const generateCsvReport = () => {
+                const headers = ['Patient ID', 'Name', 'Age', 'Gender', 'Symptoms', 'Status', 'Assigned Doctor', 'Prescription', 'Registered At'];
+                const rows = patients.map(p => {
+                    const doctorName = users.find(u => u.id === p.assignedDoctor)?.name || '';
+                    const registeredAt = p.timestamp ? new Date(p.timestamp).toLocaleString() : '';
+                    const escape = (val) => `"${String(val ?? '').replace(/"/g, '""')}"`;
+                    return [p.id, p.name, p.age, p.gender, p.symptoms, p.status, doctorName, p.prescription, registeredAt].map(escape).join(',');
+                });
+                const csvContent = [headers.join(','), ...rows].join('\n');
+                const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+                const url = URL.createObjectURL(blob);
+                const link = document.createElement('a');
+                link.href = url;
+                link.download = `CareNet_Camp_Report_${new Date().toISOString().slice(0,10)}.csv`;
+                document.body.appendChild(link);
+                link.click();
+                document.body.removeChild(link);
+                URL.revokeObjectURL(url);
+                showMsg("Report downloaded successfully.", "success");
             };
 
             return (
@@ -751,7 +906,7 @@
                                     <i className="fa-solid fa-notes-medical animate-pulse"></i>
                                 </div>
                                 <h1 className="text-4xl md:text-5xl font-black text-slate-900 dark:text-white leading-tight mb-4">CareNet Cloud Medical Camp</h1>
-                                <p className="text-slate-600 dark:text-slate-300 text-lg mb-8 px-4">Live multi-device database synchronized NGO platform. Sign-up or register below to secure your real-time digital consult ticket.</p>
+                                <p className="text-slate-600 dark:text-slate-300 text-lg mb-8 px-4 max-w-2xl mx-auto">Live multi-device database synchronized NGO platform. Sign-up or register below to secure your real-time digital consult ticket.</p>
                                 
                                 <div className="flex flex-col sm:flex-row justify-center gap-4 mb-14">
                                     <button onClick={() => handleNavigation('patient-login')} className="bg-emerald-600 hover:bg-emerald-700 text-white font-bold px-8 py-4 rounded-full shadow-lg transition transform hover:-translate-y-1">
@@ -762,64 +917,54 @@
                                     </button>
                                 </div>
 
-                                {/* Camp Information Section */}
-                                <div className="text-left bg-white dark:bg-slate-800 border border-slate-100 dark:border-slate-700 rounded-3xl shadow-xl p-6 md:p-10 relative overflow-hidden">
-                                    <div className="absolute -top-10 -right-10 w-40 h-40 bg-emerald-50 dark:bg-emerald-900/10 rounded-full"></div>
-                                    <div className="relative">
-                                        <div className="flex items-center gap-3 mb-2">
-                                            <span className="bg-emerald-100 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-400 text-[10px] font-black uppercase tracking-widest px-3 py-1 rounded-full">Live Camp</span>
-                                            <span className="text-slate-400 text-xs font-semibold">Updated in real-time</span>
+                                {/* Camp Info Section */}
+                                <div className="bg-white dark:bg-slate-800 border border-slate-100 dark:border-slate-700 rounded-3xl shadow-xl p-8 md:p-10 text-left">
+                                    <div className="flex items-center justify-center md:justify-start mb-6">
+                                        <div className="bg-emerald-600 text-white w-10 h-10 rounded-xl flex items-center justify-center mr-3 shadow"><i className="fa-solid fa-campground"></i></div>
+                                        <h2 className="text-2xl font-black text-slate-800 dark:text-white">About This Medical Camp</h2>
+                                    </div>
+                                    <p className="text-slate-600 dark:text-slate-300 text-sm mb-8 text-center md:text-left">
+                                        Organized by our NGO to provide free, quality primary healthcare, consultation and medicines to the local community. Walk in, register digitally, and get seen by a qualified doctor — no paperwork, no waiting in the dark.
+                                    </p>
+                                    <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-5">
+                                        <div className="bg-emerald-50 dark:bg-emerald-950/20 border border-emerald-100 dark:border-emerald-900/50 rounded-2xl p-5 text-center">
+                                            <i className="fa-solid fa-calendar-days text-emerald-600 dark:text-emerald-400 text-2xl mb-2"></i>
+                                            <p className="text-xs font-bold uppercase text-slate-400 mb-1">Camp Date</p>
+                                            <p className="font-bold text-slate-800 dark:text-white text-sm">Every Saturday & Sunday</p>
                                         </div>
-                                        <h2 className="text-2xl md:text-3xl font-black text-slate-900 dark:text-white mb-2">About This Medical Camp</h2>
-                                        <p className="text-slate-600 dark:text-slate-300 text-sm md:text-base mb-8 max-w-2xl">CareNet volunteers, doctors and pharmacy staff are stationed on-site to provide free consultation, diagnosis and medicine dispensing. Register once to receive a unique QR ticket that carries you through every stage of your visit — no paperwork, no waiting in the wrong line.</p>
-
-                                        <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
-                                            <div className="bg-slate-50 dark:bg-slate-900 border border-slate-100 dark:border-slate-700 rounded-2xl p-5">
-                                                <div className="w-10 h-10 rounded-xl bg-blue-100 dark:bg-blue-900/30 text-blue-600 dark:text-blue-400 flex items-center justify-center mb-3"><i className="fa-solid fa-calendar-days"></i></div>
-                                                <p className="text-[10px] font-bold uppercase text-slate-400 mb-1">Camp Date</p>
-                                                <p className="font-bold text-slate-800 dark:text-white text-sm">Every Saturday & Sunday</p>
-                                            </div>
-                                            <div className="bg-slate-50 dark:bg-slate-900 border border-slate-100 dark:border-slate-700 rounded-2xl p-5">
-                                                <div className="w-10 h-10 rounded-xl bg-amber-100 dark:bg-amber-900/30 text-amber-600 dark:text-amber-400 flex items-center justify-center mb-3"><i className="fa-solid fa-clock"></i></div>
-                                                <p className="text-[10px] font-bold uppercase text-slate-400 mb-1">Timing</p>
-                                                <p className="font-bold text-slate-800 dark:text-white text-sm">9:00 AM – 4:00 PM</p>
-                                            </div>
-                                            <div className="bg-slate-50 dark:bg-slate-900 border border-slate-100 dark:border-slate-700 rounded-2xl p-5">
-                                                <div className="w-10 h-10 rounded-xl bg-rose-100 dark:bg-rose-900/30 text-rose-600 dark:text-rose-400 flex items-center justify-center mb-3"><i className="fa-solid fa-location-dot"></i></div>
-                                                <p className="text-[10px] font-bold uppercase text-slate-400 mb-1">Venue</p>
-                                                <p className="font-bold text-slate-800 dark:text-white text-sm">Community Health Hall, Camp Ground</p>
-                                            </div>
-                                            <div className="bg-slate-50 dark:bg-slate-900 border border-slate-100 dark:border-slate-700 rounded-2xl p-5">
-                                                <div className="w-10 h-10 rounded-xl bg-emerald-100 dark:bg-emerald-900/30 text-emerald-600 dark:text-emerald-400 flex items-center justify-center mb-3"><i className="fa-solid fa-hand-holding-medical"></i></div>
-                                                <p className="text-[10px] font-bold uppercase text-slate-400 mb-1">Cost</p>
-                                                <p className="font-bold text-slate-800 dark:text-white text-sm">Free Consultation & Aid</p>
-                                            </div>
+                                        <div className="bg-blue-50 dark:bg-blue-950/20 border border-blue-100 dark:border-blue-900/50 rounded-2xl p-5 text-center">
+                                            <i className="fa-solid fa-clock text-blue-600 dark:text-blue-400 text-2xl mb-2"></i>
+                                            <p className="text-xs font-bold uppercase text-slate-400 mb-1">Timings</p>
+                                            <p className="font-bold text-slate-800 dark:text-white text-sm">9:00 AM – 4:00 PM</p>
                                         </div>
-
-                                        <div className="grid md:grid-cols-2 gap-8">
-                                            <div>
-                                                <h3 className="text-xs font-bold text-slate-400 uppercase mb-3 flex items-center"><i className="fa-solid fa-list-check mr-2"></i> Services Offered</h3>
-                                                <ul className="space-y-2 text-sm">
-                                                    {["General Health Check-up", "Pediatric Consultation", "Free Medicine Dispensing", "Basic Diagnostics & Screening", "Health Awareness Counselling"].map((s, i) => (
-                                                        <li key={i} className="flex items-center text-slate-700 dark:text-slate-300"><i className="fa-solid fa-circle-check text-emerald-500 mr-2"></i> {s}</li>
-                                                    ))}
-                                                </ul>
-                                            </div>
-                                            <div>
-                                                <h3 className="text-xs font-bold text-slate-400 uppercase mb-3 flex items-center"><i className="fa-solid fa-circle-info mr-2"></i> How It Works</h3>
-                                                <ol className="space-y-2 text-sm">
-                                                    {["Register once with your details to get a QR ticket", "Volunteer scans your QR and assigns a free doctor", "Consult the doctor & receive a digital prescription", "Show the Rx QR at pharmacy to collect medicines"].map((s, i) => (
-                                                        <li key={i} className="flex items-start text-slate-700 dark:text-slate-300">
-                                                            <span className="w-5 h-5 mr-2 flex-shrink-0 rounded-full bg-emerald-600 text-white text-[10px] font-bold flex items-center justify-center mt-0.5">{i + 1}</span> {s}
-                                                        </li>
-                                                    ))}
-                                                </ol>
-                                            </div>
+                                        <div className="bg-amber-50 dark:bg-amber-950/20 border border-amber-100 dark:border-amber-900/50 rounded-2xl p-5 text-center">
+                                            <i className="fa-solid fa-location-dot text-amber-600 dark:text-amber-400 text-2xl mb-2"></i>
+                                            <p className="text-xs font-bold uppercase text-slate-400 mb-1">Venue</p>
+                                            <p className="font-bold text-slate-800 dark:text-white text-sm">Community Hall, Camp Grounds</p>
                                         </div>
-
-                                        <div className="mt-8 pt-6 border-t border-dashed border-slate-200 dark:border-slate-700 flex flex-wrap gap-6 text-sm text-slate-500 dark:text-slate-400">
-                                            <span className="flex items-center"><i className="fa-solid fa-phone mr-2 text-emerald-500"></i> Camp Helpline: +91 98765 43210</span>
-                                            <span className="flex items-center"><i className="fa-solid fa-envelope mr-2 text-emerald-500"></i> contact@carenetngo.org</span>
+                                        <div className="bg-rose-50 dark:bg-rose-950/20 border border-rose-100 dark:border-rose-900/50 rounded-2xl p-5 text-center">
+                                            <i className="fa-solid fa-hand-holding-medical text-rose-600 dark:text-rose-400 text-2xl mb-2"></i>
+                                            <p className="text-xs font-bold uppercase text-slate-400 mb-1">Cost</p>
+                                            <p className="font-bold text-slate-800 dark:text-white text-sm">100% Free Consultation & Medicine</p>
+                                        </div>
+                                    </div>
+                                    <div className="mt-8 grid sm:grid-cols-2 gap-5">
+                                        <div>
+                                            <h3 className="text-xs font-bold uppercase text-slate-400 mb-3">Services Offered</h3>
+                                            <ul className="space-y-2 text-sm text-slate-700 dark:text-slate-300">
+                                                <li><i className="fa-solid fa-check text-emerald-500 mr-2"></i>General health checkups</li>
+                                                <li><i className="fa-solid fa-check text-emerald-500 mr-2"></i>Pediatric consultation</li>
+                                                <li><i className="fa-solid fa-check text-emerald-500 mr-2"></i>Free medicine dispensing</li>
+                                                <li><i className="fa-solid fa-check text-emerald-500 mr-2"></i>Digital queue & prescription tracking</li>
+                                            </ul>
+                                        </div>
+                                        <div>
+                                            <h3 className="text-xs font-bold uppercase text-slate-400 mb-3">Need Help / Contact</h3>
+                                            <ul className="space-y-2 text-sm text-slate-700 dark:text-slate-300">
+                                                <li><i className="fa-solid fa-phone text-blue-500 mr-2"></i>Camp Helpdesk: available on-site</li>
+                                                <li><i className="fa-solid fa-envelope text-blue-500 mr-2"></i>Volunteers at the entrance can assist with sign-up</li>
+                                                <li><i className="fa-solid fa-circle-info text-blue-500 mr-2"></i>Carry a valid ID for faster registration</li>
+                                            </ul>
                                         </div>
                                     </div>
                                 </div>
@@ -948,8 +1093,8 @@
                                             <div className="bg-emerald-50 dark:bg-emerald-900/20 p-8 rounded-3xl text-center border border-emerald-200 dark:border-emerald-800 shadow-xl">
                                                 <div className="w-20 h-20 bg-emerald-500 text-white rounded-full flex items-center justify-center text-4xl mx-auto mb-4 shadow-lg"><i className="fa-solid fa-circle-check"></i></div>
                                                 <h2 className="text-2xl font-black text-emerald-700 dark:text-emerald-400 mb-2">Consulation Finished</h2>
-                                                <p className="text-slate-600 dark:text-slate-300 text-sm mb-4">Thank you, {me.name}. Your billing is finalized and prescriptions have been successfully dispensed.</p>
-                                                <span className="text-xs bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300 px-3 py-1 rounded-full font-bold">Closed Voucher: ₹{me.billAmount}</span>
+                                                <p className="text-slate-600 dark:text-slate-300 text-sm mb-4">Thank you, {me.name}. Your medication has been dispensed free of cost. Your visit is now complete.</p>
+                                                <span className="text-xs bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300 px-3 py-1 rounded-full font-bold"><i className="fa-solid fa-check-circle mr-1"></i> Medication Dispensed</span>
 
                                                 {me.prescription && (
                                                     <div className="mt-6 text-left bg-white dark:bg-slate-800 border border-emerald-200 dark:border-emerald-800 rounded-2xl p-5">
@@ -959,7 +1104,7 @@
                                                 )}
 
                                                 <button onClick={handleRegisterAgain} className="mt-6 w-full py-3.5 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-xl shadow-lg transition flex items-center justify-center">
-                                                    <i className="fa-solid fa-rotate-left mr-2"></i> Register Again &amp; Generate New QR
+                                                    <i className="fa-solid fa-rotate-left mr-2"></i> Register Again For a New Visit
                                                 </button>
                                             </div>
                                         );
@@ -1007,54 +1152,228 @@
 
                         {/* VIEW: ADMIN DASHBOARD */}
                         {view === 'admin-dashboard' && currentUser?.role === 'Admin' && (
-                            <div className="w-full max-w-5xl animate-fade-in space-y-6">
-                                <div className="flex justify-between items-end mb-4 border-b border-slate-200 dark:border-slate-700 pb-4">
+                            <div className="w-full max-w-6xl animate-fade-in space-y-6">
+                                <div className="flex flex-col sm:flex-row justify-between sm:items-end mb-2 border-b border-slate-200 dark:border-slate-700 pb-4 gap-3">
                                     <div>
                                         <h2 className="text-3xl font-black text-slate-800 dark:text-white">Admin Control Panel</h2>
-                                        <p className="text-slate-500">Manage NGO staff accounts and view sync metrics.</p>
+                                        <p className="text-slate-500">Camp-wide dashboard, analytics and staff management.</p>
                                     </div>
-                                    <div className="text-right">
-                                        <span className="block text-3xl font-black text-emerald-600">{patients.length}</span>
-                                        <span className="text-[10px] uppercase font-bold text-slate-400 tracking-wider">Patients Registered</span>
+                                    {/* Tab Switcher */}
+                                    <div className="flex bg-slate-100 dark:bg-slate-800 rounded-xl p-1.5 gap-1 border dark:border-slate-700 w-full sm:w-auto">
+                                        {[
+                                            { key: 'overview', label: 'Dashboard', icon: 'fa-gauge-high' },
+                                            { key: 'analytics', label: 'Analytics', icon: 'fa-chart-pie' },
+                                            { key: 'reports', label: 'Reports', icon: 'fa-file-export' }
+                                        ].map(tab => (
+                                            <button
+                                                key={tab.key}
+                                                onClick={() => setAdminTab(tab.key)}
+                                                className={`flex-1 sm:flex-none px-4 py-2 rounded-lg text-sm font-bold transition flex items-center justify-center gap-2 ${adminTab === tab.key ? 'bg-emerald-600 text-white shadow' : 'text-slate-500 hover:bg-slate-200 dark:hover:bg-slate-700'}`}
+                                            >
+                                                <i className={`fa-solid ${tab.icon}`}></i>
+                                                <span className="hidden sm:inline">{tab.label}</span>
+                                            </button>
+                                        ))}
                                     </div>
                                 </div>
 
-                                <div className="grid md:grid-cols-3 gap-6">
-                                    <div className="md:col-span-1 bg-white dark:bg-slate-800 p-6 rounded-2xl border dark:border-slate-700 shadow-sm h-fit">
-                                        <h3 className="font-bold text-lg mb-4 flex items-center"><i className="fa-solid fa-user-plus mr-2 text-emerald-500"></i> Add Staff Account</h3>
-                                        <form onSubmit={handleAddUser} className="space-y-4">
-                                            <input required name="name" type="text" placeholder="Full Name" className="w-full px-3 py-2 border dark:border-slate-600 rounded-lg bg-slate-50 dark:bg-slate-900 text-sm outline-none focus:ring-1 focus:ring-emerald-500" />
-                                            <input required name="email" type="email" placeholder="Email Address" className="w-full px-3 py-2 border dark:border-slate-600 rounded-lg bg-slate-50 dark:bg-slate-900 text-sm outline-none focus:ring-1 focus:ring-emerald-500" />
-                                            <input required name="pass" type="password" placeholder="Password" className="w-full px-3 py-2 border dark:border-slate-600 rounded-lg bg-slate-50 dark:bg-slate-900 text-sm outline-none focus:ring-1 focus:ring-emerald-500" />
-                                            <select required name="role" className="w-full px-3 py-2 border dark:border-slate-600 rounded-lg bg-slate-50 dark:bg-slate-900 text-sm outline-none">
-                                                <option value="">Select Role...</option><option>Volunteer</option><option>Doctor</option><option>Pharmacy</option>
-                                            </select>
-                                            <button type="submit" className="w-full py-2 bg-slate-800 dark:bg-slate-700 text-white font-bold rounded-lg hover:bg-slate-900 transition">Create Staff</button>
-                                        </form>
-                                    </div>
+                                {/* ---- TAB: OVERVIEW / DASHBOARD ---- */}
+                                {adminTab === 'overview' && (
+                                    <div className="space-y-6 animate-fade-in">
+                                        {/* Stat Cards */}
+                                        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                                            <div className="bg-white dark:bg-slate-800 border dark:border-slate-700 rounded-2xl p-5 shadow-sm">
+                                                <div className="w-10 h-10 rounded-xl bg-amber-100 dark:bg-amber-900/30 text-amber-600 dark:text-amber-400 flex items-center justify-center mb-3"><i className="fa-solid fa-people-carry-box"></i></div>
+                                                <span className="block text-2xl font-black text-slate-800 dark:text-white">{volunteerCount}</span>
+                                                <span className="text-[10px] uppercase font-bold text-slate-400 tracking-wider">Volunteers</span>
+                                            </div>
+                                            <div className="bg-white dark:bg-slate-800 border dark:border-slate-700 rounded-2xl p-5 shadow-sm">
+                                                <div className="w-10 h-10 rounded-xl bg-blue-100 dark:bg-blue-900/30 text-blue-600 dark:text-blue-400 flex items-center justify-center mb-3"><i className="fa-solid fa-user-doctor"></i></div>
+                                                <span className="block text-2xl font-black text-slate-800 dark:text-white">{doctorCount}</span>
+                                                <span className="text-[10px] uppercase font-bold text-slate-400 tracking-wider">Doctors</span>
+                                            </div>
+                                            <div className="bg-white dark:bg-slate-800 border dark:border-slate-700 rounded-2xl p-5 shadow-sm">
+                                                <div className="w-10 h-10 rounded-xl bg-rose-100 dark:bg-rose-900/30 text-rose-600 dark:text-rose-400 flex items-center justify-center mb-3"><i className="fa-solid fa-prescription-bottle-medical"></i></div>
+                                                <span className="block text-2xl font-black text-slate-800 dark:text-white">{pharmacyCount}</span>
+                                                <span className="text-[10px] uppercase font-bold text-slate-400 tracking-wider">Pharmacy Staff</span>
+                                            </div>
+                                            <div className="bg-white dark:bg-slate-800 border dark:border-slate-700 rounded-2xl p-5 shadow-sm">
+                                                <div className="w-10 h-10 rounded-xl bg-emerald-100 dark:bg-emerald-900/30 text-emerald-600 dark:text-emerald-400 flex items-center justify-center mb-3"><i className="fa-solid fa-user-injured"></i></div>
+                                                <span className="block text-2xl font-black text-slate-800 dark:text-white">{totalPatients}</span>
+                                                <span className="text-[10px] uppercase font-bold text-slate-400 tracking-wider">Patients Registered</span>
+                                            </div>
+                                        </div>
 
-                                    <div className="md:col-span-2 bg-white dark:bg-slate-800 p-6 rounded-2xl border dark:border-slate-700 shadow-sm">
-                                        <h3 className="font-bold text-lg mb-4 flex items-center"><i className="fa-solid fa-users-gear mr-2 text-blue-500"></i> Active System Members</h3>
-                                        <div className="space-y-3">
-                                            {users.map(u => (
-                                                <div key={u.id} className="flex justify-between items-center p-3 bg-slate-50 dark:bg-slate-900 rounded-xl border border-slate-100 dark:border-slate-700">
-                                                    <div className="flex items-center space-x-4">
-                                                        <div className="w-10 h-10 rounded-full bg-blue-100 dark:bg-blue-900/30 text-blue-600 dark:text-blue-400 flex justify-center items-center font-bold">
-                                                            {u.role.charAt(0)}
+                                        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                                            <div className="bg-slate-50 dark:bg-slate-900/40 border border-dashed border-slate-300 dark:border-slate-700 rounded-2xl p-5 text-center">
+                                                <span className="block text-xl font-black text-slate-500">{awaitingCount}</span>
+                                                <span className="text-[10px] uppercase font-bold text-slate-400 tracking-wider">Awaiting Triage</span>
+                                            </div>
+                                            <div className="bg-slate-50 dark:bg-slate-900/40 border border-dashed border-slate-300 dark:border-slate-700 rounded-2xl p-5 text-center">
+                                                <span className="block text-xl font-black text-indigo-500">{inQueueCount}</span>
+                                                <span className="text-[10px] uppercase font-bold text-slate-400 tracking-wider">In Doctor Queue</span>
+                                            </div>
+                                            <div className="bg-slate-50 dark:bg-slate-900/40 border border-dashed border-slate-300 dark:border-slate-700 rounded-2xl p-5 text-center">
+                                                <span className="block text-xl font-black text-rose-500">{prescribedCount}</span>
+                                                <span className="text-[10px] uppercase font-bold text-slate-400 tracking-wider">At Pharmacy</span>
+                                            </div>
+                                            <div className="bg-slate-50 dark:bg-slate-900/40 border border-dashed border-slate-300 dark:border-slate-700 rounded-2xl p-5 text-center">
+                                                <span className="block text-xl font-black text-emerald-600">{attendedCount}</span>
+                                                <span className="text-[10px] uppercase font-bold text-slate-400 tracking-wider">Patients Attended</span>
+                                            </div>
+                                        </div>
+
+                                        <div className="grid md:grid-cols-3 gap-6">
+                                            <div className="md:col-span-1 bg-white dark:bg-slate-800 p-6 rounded-2xl border dark:border-slate-700 shadow-sm h-fit">
+                                                <h3 className="font-bold text-lg mb-4 flex items-center"><i className="fa-solid fa-user-plus mr-2 text-emerald-500"></i> Add Staff Account</h3>
+                                                <form onSubmit={handleAddUser} className="space-y-4">
+                                                    <input required name="name" type="text" placeholder="Full Name" className="w-full px-3 py-2 border dark:border-slate-600 rounded-lg bg-slate-50 dark:bg-slate-900 text-sm outline-none focus:ring-1 focus:ring-emerald-500" />
+                                                    <input required name="email" type="email" placeholder="Email Address" className="w-full px-3 py-2 border dark:border-slate-600 rounded-lg bg-slate-50 dark:bg-slate-900 text-sm outline-none focus:ring-1 focus:ring-emerald-500" />
+                                                    <input required name="pass" type="password" placeholder="Password" className="w-full px-3 py-2 border dark:border-slate-600 rounded-lg bg-slate-50 dark:bg-slate-900 text-sm outline-none focus:ring-1 focus:ring-emerald-500" />
+                                                    <select required name="role" className="w-full px-3 py-2 border dark:border-slate-600 rounded-lg bg-slate-50 dark:bg-slate-900 text-sm outline-none">
+                                                        <option value="">Select Role...</option><option>Volunteer</option><option>Doctor</option><option>Pharmacy</option>
+                                                    </select>
+                                                    <button type="submit" className="w-full py-2 bg-slate-800 dark:bg-slate-700 text-white font-bold rounded-lg hover:bg-slate-900 transition">Create Staff</button>
+                                                </form>
+                                            </div>
+
+                                            <div className="md:col-span-2 bg-white dark:bg-slate-800 p-6 rounded-2xl border dark:border-slate-700 shadow-sm">
+                                                <h3 className="font-bold text-lg mb-4 flex items-center"><i className="fa-solid fa-users-gear mr-2 text-blue-500"></i> Active System Members</h3>
+                                                <div className="space-y-3 max-h-[420px] overflow-y-auto pr-1">
+                                                    {users.map(u => (
+                                                        <div key={u.id} className="flex justify-between items-center p-3 bg-slate-50 dark:bg-slate-900 rounded-xl border border-slate-100 dark:border-slate-700">
+                                                            <div className="flex items-center space-x-4">
+                                                                <div className="w-10 h-10 rounded-full bg-blue-100 dark:bg-blue-900/30 text-blue-600 dark:text-blue-400 flex justify-center items-center font-bold">
+                                                                    {u.role.charAt(0)}
+                                                                </div>
+                                                                <div>
+                                                                    <div className="font-bold text-slate-800 dark:text-white text-sm">{u.name} <span className="ml-2 text-[10px] uppercase bg-slate-200 dark:bg-slate-700 px-2 py-0.5 rounded">{u.role}</span></div>
+                                                                    <div className="text-xs text-slate-500">{u.email}</div>
+                                                                </div>
+                                                            </div>
+                                                            {u.role !== 'Admin' && (
+                                                                <button onClick={() => removeUser(u.id)} className="text-slate-400 hover:text-red-500 p-2"><i className="fa-solid fa-trash"></i></button>
+                                                            )}
                                                         </div>
-                                                        <div>
-                                                            <div className="font-bold text-slate-800 dark:text-white text-sm">{u.name} <span className="ml-2 text-[10px] uppercase bg-slate-200 dark:bg-slate-700 px-2 py-0.5 rounded">{u.role}</span></div>
-                                                            <div className="text-xs text-slate-500">{u.email}</div>
-                                                        </div>
-                                                    </div>
-                                                    {u.role !== 'Admin' && (
-                                                        <button onClick={() => removeUser(u.id)} className="text-slate-400 hover:text-red-500 p-2"><i className="fa-solid fa-trash"></i></button>
-                                                    )}
+                                                    ))}
                                                 </div>
-                                            ))}
+                                            </div>
                                         </div>
                                     </div>
-                                </div>
+                                )}
+
+                                {/* ---- TAB: ANALYTICS ---- */}
+                                {adminTab === 'analytics' && (
+                                    <div className="space-y-6 animate-fade-in">
+                                        <div className="grid md:grid-cols-2 gap-6">
+                                            {/* Patient Status Breakdown */}
+                                            <div className="bg-white dark:bg-slate-800 p-6 rounded-2xl border dark:border-slate-700 shadow-sm">
+                                                <h3 className="font-bold text-lg mb-5 flex items-center"><i className="fa-solid fa-chart-pie mr-2 text-emerald-500"></i> Patient Status Breakdown</h3>
+                                                {totalPatients === 0 ? (
+                                                    <p className="text-sm text-slate-400 italic text-center py-4">No patient data yet.</p>
+                                                ) : (
+                                                    <div className="flex flex-col sm:flex-row items-center gap-6">
+                                                        <DonutChart segments={statusBreakdown} />
+                                                        <div className="w-full flex-1 space-y-4">
+                                                            {statusBreakdown.map(s => (
+                                                                <div key={s.label}>
+                                                                    <div className="flex justify-between text-xs font-bold mb-1">
+                                                                        <span className="text-slate-600 dark:text-slate-300 flex items-center gap-1.5">
+                                                                            <span className="w-2.5 h-2.5 rounded-full inline-block" style={{ backgroundColor: s.hex }}></span>
+                                                                            {s.label}
+                                                                        </span>
+                                                                        <span className="text-slate-500">{s.count}</span>
+                                                                    </div>
+                                                                    <div className="w-full h-3 bg-slate-100 dark:bg-slate-700 rounded-full overflow-hidden">
+                                                                        <div className={`h-full ${s.color} rounded-full transition-all duration-500`} style={{ width: `${(s.count / maxStatusCount) * 100}%` }}></div>
+                                                                    </div>
+                                                                </div>
+                                                            ))}
+                                                        </div>
+                                                    </div>
+                                                )}
+                                            </div>
+
+                                            {/* Gender Breakdown */}
+                                            <div className="bg-white dark:bg-slate-800 p-6 rounded-2xl border dark:border-slate-700 shadow-sm">
+                                                <h3 className="font-bold text-lg mb-5 flex items-center"><i className="fa-solid fa-venus-mars mr-2 text-blue-500"></i> Gender Breakdown</h3>
+                                                <div className="space-y-4">
+                                                    {genderBreakdown.map(g => (
+                                                        <div key={g.label}>
+                                                            <div className="flex justify-between text-xs font-bold mb-1">
+                                                                <span className="text-slate-600 dark:text-slate-300">{g.label}</span>
+                                                                <span className="text-slate-500">{g.count}</span>
+                                                            </div>
+                                                            <div className="w-full h-3 bg-slate-100 dark:bg-slate-700 rounded-full overflow-hidden">
+                                                                <div className="h-full bg-blue-500 rounded-full transition-all duration-500" style={{ width: `${(g.count / maxGenderCount) * 100}%` }}></div>
+                                                            </div>
+                                                        </div>
+                                                    ))}
+                                                    {totalPatients === 0 && <p className="text-sm text-slate-400 italic text-center py-4">No patient data yet.</p>}
+                                                </div>
+                                            </div>
+                                        </div>
+
+                                        {/* Doctor-wise Patients Handled */}
+                                        <div className="bg-white dark:bg-slate-800 p-6 rounded-2xl border dark:border-slate-700 shadow-sm">
+                                            <h3 className="font-bold text-lg mb-5 flex items-center"><i className="fa-solid fa-user-doctor mr-2 text-rose-500"></i> Patients Handled Per Doctor</h3>
+                                            <div className="space-y-4">
+                                                {doctorBreakdown.map(d => (
+                                                    <div key={d.label}>
+                                                        <div className="flex justify-between text-xs font-bold mb-1">
+                                                            <span className="text-slate-600 dark:text-slate-300">{d.label}</span>
+                                                            <span className="text-slate-500">{d.count}</span>
+                                                        </div>
+                                                        <div className="w-full h-3 bg-slate-100 dark:bg-slate-700 rounded-full overflow-hidden">
+                                                            <div className="h-full bg-rose-500 rounded-full transition-all duration-500" style={{ width: `${(d.count / maxDoctorCount) * 100}%` }}></div>
+                                                        </div>
+                                                    </div>
+                                                ))}
+                                                {doctorBreakdown.length === 0 && <p className="text-sm text-slate-400 italic text-center py-4">No doctors added yet.</p>}
+                                            </div>
+                                        </div>
+                                    </div>
+                                )}
+
+                                {/* ---- TAB: REPORTS ---- */}
+                                {adminTab === 'reports' && (
+                                    <div className="space-y-6 animate-fade-in">
+                                        <div className="bg-white dark:bg-slate-800 p-8 rounded-2xl border dark:border-slate-700 shadow-sm">
+                                            <div className="flex items-center mb-4">
+                                                <div className="w-12 h-12 bg-emerald-100 dark:bg-emerald-900/30 text-emerald-600 dark:text-emerald-400 rounded-xl flex items-center justify-center text-xl mr-4"><i className="fa-solid fa-file-csv"></i></div>
+                                                <div>
+                                                    <h3 className="font-bold text-lg">Generate Full Camp Report</h3>
+                                                    <p className="text-sm text-slate-500">Download a complete CSV of every registered patient, their status, assigned doctor and prescription.</p>
+                                                </div>
+                                            </div>
+                                            <button onClick={generateCsvReport} className="w-full sm:w-auto px-8 py-3.5 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-xl shadow-lg transition flex items-center justify-center gap-2">
+                                                <i className="fa-solid fa-download"></i> Download CSV Report
+                                            </button>
+                                        </div>
+
+                                        <div className="bg-white dark:bg-slate-800 p-8 rounded-2xl border dark:border-slate-700 shadow-sm">
+                                            <h3 className="font-bold text-lg mb-4 flex items-center"><i className="fa-solid fa-list-check mr-2 text-blue-500"></i> Report Summary</h3>
+                                            <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 text-center">
+                                                <div className="p-4 bg-slate-50 dark:bg-slate-900 rounded-xl border dark:border-slate-700">
+                                                    <span className="block text-xl font-black text-slate-800 dark:text-white">{totalPatients}</span>
+                                                    <span className="text-[10px] uppercase font-bold text-slate-400">Total Registered</span>
+                                                </div>
+                                                <div className="p-4 bg-slate-50 dark:bg-slate-900 rounded-xl border dark:border-slate-700">
+                                                    <span className="block text-xl font-black text-emerald-600">{attendedCount}</span>
+                                                    <span className="text-[10px] uppercase font-bold text-slate-400">Fully Attended</span>
+                                                </div>
+                                                <div className="p-4 bg-slate-50 dark:bg-slate-900 rounded-xl border dark:border-slate-700">
+                                                    <span className="block text-xl font-black text-indigo-500">{inQueueCount + awaitingCount}</span>
+                                                    <span className="text-[10px] uppercase font-bold text-slate-400">Still Pending</span>
+                                                </div>
+                                                <div className="p-4 bg-slate-50 dark:bg-slate-900 rounded-xl border dark:border-slate-700">
+                                                    <span className="block text-xl font-black text-blue-500">{doctorCount + volunteerCount + pharmacyCount}</span>
+                                                    <span className="text-[10px] uppercase font-bold text-slate-400">Total Staff On Duty</span>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                )}
                             </div>
                         )}
 
@@ -1237,18 +1556,15 @@
                                             </div>
                                         </div>
 
-                                        <form onSubmit={collectPayment} className="space-y-4 bg-emerald-50 dark:bg-emerald-950/10 p-5 rounded-2xl border border-emerald-100 dark:border-emerald-900/50">
-                                            <div>
-                                                <label className="block text-xs font-bold uppercase text-emerald-700 dark:text-emerald-400 mb-2">Collect Bill Amount (₹)</label>
-                                                <div className="relative">
-                                                    <span className="absolute left-4 top-1/2 transform -translate-y-1/2 text-slate-500 font-bold">₹</span>
-                                                    <input required name="amount" type="number" min="0" step="1" placeholder="e.g. 100" className="w-full pl-8 pr-4 py-3 border border-emerald-200 dark:border-emerald-700/50 rounded-xl bg-white dark:bg-slate-800 focus:ring-2 focus:ring-emerald-500 outline-none font-bold text-lg" />
-                                                </div>
+                                        <div className="bg-emerald-50 dark:bg-emerald-950/10 p-5 rounded-2xl border border-emerald-100 dark:border-emerald-900/50 space-y-4">
+                                            <div className="flex items-center text-emerald-800 dark:text-emerald-300 text-sm font-semibold">
+                                                <i className="fa-solid fa-hand-holding-heart mr-2 text-lg"></i>
+                                                Medicines are provided free of cost at this camp. No payment needs to be collected.
                                             </div>
-                                            <button type="submit" className="w-full py-4 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-xl shadow-lg transition flex items-center justify-center text-lg">
-                                                <i className="fa-solid fa-cash-register mr-2"></i> Collect Payment & Dispense
+                                            <button onClick={completeDispense} className="w-full py-4 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-xl shadow-lg transition flex items-center justify-center text-lg">
+                                                <i className="fa-solid fa-box-open mr-2"></i> Confirm Medication Given & Complete Visit
                                             </button>
-                                        </form>
+                                        </div>
                                     </div>
                                 )}
                             </div>

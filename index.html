@@ -132,7 +132,15 @@
         }
 
         function QRScanner({ onScan, title, onCancel }) {
+            // BUG FIX: previously scanner.clear() could be called twice —
+            // once inside the successful-scan callback and once again in the
+            // effect cleanup on unmount — which threw noisy console errors
+            // ("cannot clear while scan is not running"). A ref flag now
+            // guarantees clear() only ever runs once per scanner instance.
+            const clearedRef = React.useRef(false);
+
             React.useEffect(() => {
+                clearedRef.current = false;
                 const scanner = new Html5QrcodeScanner("reader", { 
                     fps: 10, 
                     qrbox: { width: 250, height: 250 },
@@ -143,14 +151,20 @@
                 
                 scanner.render(
                     (decodedText) => {
-                        scanner.clear();
+                        if (!clearedRef.current) {
+                            clearedRef.current = true;
+                            scanner.clear().catch(e => console.error("Scanner clean error:", e));
+                        }
                         onScan(decodedText);
                     },
                     (error) => { /* ignore normal loop frame scan errors */ }
                 );
                 
                 return () => {
-                    scanner.clear().catch(e => console.error("Scanner clean error:", e));
+                    if (!clearedRef.current) {
+                        clearedRef.current = true;
+                        scanner.clear().catch(e => console.error("Scanner clean error:", e));
+                    }
                 };
             }, [onScan]);
 

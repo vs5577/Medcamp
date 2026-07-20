@@ -71,42 +71,6 @@
         }
         
         #reader a { color: #3b82f6 !important; text-decoration: underline !important; font-weight: 500 !important; margin-top: 10px !important; display: inline-block !important; }
-        
-        /* Google Translate UI Fixes */
-        body { top: 0 !important; } 
-        .skiptranslate iframe { display: none !important; } 
-        
-        .goog-te-gadget-simple {
-            background-color: #f8fafc !important;
-            border: 1px solid #cbd5e1 !important;
-            border-radius: 0.75rem !important;
-            padding: 0.5rem 1rem !important;
-            font-family: 'Inter', sans-serif !important;
-            display: inline-flex !important;
-            align-items: center !important;
-        }
-        .dark .goog-te-gadget-simple {
-            background-color: #1e293b !important;
-            border-color: #475569 !important;
-        }
-        .goog-te-gadget-simple span { color: #0f172a !important; font-weight: 500 !important; }
-        .dark .goog-te-gadget-simple span { color: #f1f5f9 !important; }
-        .goog-te-gadget-icon { display: none !important; } 
-
-        /* Custom compact language switcher: keep Google's default widget in the DOM
-           and technically "visible" (display:none breaks its init/combo-select in
-           some browsers) but tucked off-screen, since we drive it from our own
-           styled dropdown instead. */
-        #google_translate_element {
-            position: absolute !important;
-            top: -9999px !important;
-            left: -9999px !important;
-            height: 1px !important;
-            width: 1px !important;
-            overflow: hidden !important;
-        }
-        .goog-te-banner-frame { display: none !important; }
-        body > .skiptranslate { display: none !important; }
 
         .lang-select-box {
             background-color: #f8fafc;
@@ -385,86 +349,207 @@
             { code: 'te', label: 'Telugu' }
         ];
 
-        // Sets the cookie Google's widget itself uses to remember the chosen
-        // language. Setting it ourselves (in addition to driving the select
-        // box) means translation still applies even in cases where the
-        // combo box swap alone doesn't stick, and it survives a refresh.
-        function setGoogTransCookie(langCode) {
-            const value = langCode === 'en' ? '' : `/en/${langCode}`;
-            const hostname = window.location.hostname;
-            [
-                `googtrans=${value};path=/`,
-                `googtrans=${value};path=/;domain=${hostname}`,
-                `googtrans=${value};path=/;domain=.${hostname}`
-            ].forEach(cookieStr => { document.cookie = cookieStr; });
+        // ---------------------------------------------------------------
+        // Self-hosted translation engine.
+        //
+        // The old approach embedded Google's website-translator widget,
+        // which relies on a cross-origin iframe + cookies. Modern Chrome's
+        // third-party-cookie restrictions (and some networks) can stop
+        // that widget from ever finishing initialization, permanently
+        // stuck on "loading" with no way to recover — exactly the bug
+        // reported.
+        //
+        // Instead, this calls Google's lightweight translate endpoint
+        // directly (plain GET, no cookies, no iframe) for the actual
+        // English text found on the page, caches every result, and writes
+        // translated strings straight into the existing DOM text nodes.
+        // Because we only ever change nodeValue (never add/remove nodes),
+        // this can't cause the removeChild/insertBefore crashes that used
+        // to plague widget-based translation either.
+        // ---------------------------------------------------------------
+
+        const translationCache = { en: {} };
+        const originalTextByNode = new WeakMap();
+        let translationGeneration = 0;
+        let isApplyingTranslation = false;
+
+        (function loadTranslationCache() {
+            try {
+                const raw = localStorage.getItem('carenet_translation_cache');
+                if (raw) Object.assign(translationCache, JSON.parse(raw));
+            } catch (e) { /* corrupt/unavailable cache — start fresh */ }
+        })();
+
+        function persistTranslationCache() {
+            try { localStorage.setItem('carenet_translation_cache', JSON.stringify(translationCache)); }
+            catch (e) { /* storage full/unavailable — cache just stays in-memory */ }
+        }
+
+        async function translateOneString(text, targetLang, attempt = 0) {
+            if (translationCache[targetLang] && translationCache[targetLang][text] !== undefined) {
+                return translationCache[targetLang][text];
+            }
+            const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl=${targetLang}&dt=t&q=${encodeURIComponent(text)}`;
+            const res = await fetch(url);
+            if (res.status === 429 && attempt < 3) {
+                await new Promise(r => setTimeout(r, 500 * (attempt + 1)));
+                return translateOneString(text, targetLang, attempt + 1);
+            }
+            if (!res.ok) throw new Error('translate request failed: ' + res.status);
+            const data = await res.json();
+            const translated = (data[0] || []).map(segment => segment[0]).join('');
+            if (!translationCache[targetLang]) translationCache[targetLang] = {};
+            translationCache[targetLang][text] = translated;
+            return translated;
+        }
+
+        // Runs `worker` over `items` with at most `limit` in flight at once,
+        // so we don't fire hundreds of simultaneous requests at once.
+        async function runWithConcurrency(items, limit, worker) {
+            let cursor = 0;
+            const lanes = new Array(Math.min(limit, items.length) || 0).fill(0).map(async () => {
+                while (cursor < items.length) {
+                    const item = items[cursor++];
+                    await worker(item);
+                }
+            });
+            await Promise.all(lanes);
+        }
+
+        function isTranslatableTextNode(node) {
+            if (!node || node.nodeType !== Node.TEXT_NODE || !node.nodeValue || !node.nodeValue.trim()) return false;
+            let el = node.parentElement;
+            while (el) {
+                const tag = el.tagName;
+                if (tag === 'SCRIPT' || tag === 'STYLE') return false;
+                if (el.classList && el.classList.contains('notranslate')) return false;
+                if (el.getAttribute && el.getAttribute('translate') === 'no') return false;
+                el = el.parentElement;
+            }
+            return true;
+        }
+
+        function collectTranslatableTextNodes(root) {
+            const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+                acceptNode: node => isTranslatableTextNode(node) ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_SKIP
+            });
+            const nodes = [];
+            let current;
+            while ((current = walker.nextNode())) nodes.push(current);
+            return nodes;
+        }
+
+        // Translates (or restores to English) every visible text node
+        // currently in the DOM. Safe to call repeatedly — anything already
+        // translated/cached is applied instantly and only genuinely new
+        // text triggers a network call.
+        async function applyTranslationToPage(targetLang, onProgress) {
+            const root = document.getElementById('root');
+            if (!root) return;
+            const myGeneration = ++translationGeneration;
+            const nodes = collectTranslatableTextNodes(root);
+
+            const pending = [];
+            isApplyingTranslation = true;
+            nodes.forEach(node => {
+                if (!originalTextByNode.has(node)) originalTextByNode.set(node, node.nodeValue);
+                const original = originalTextByNode.get(node);
+                if (targetLang === 'en') {
+                    if (node.nodeValue !== original) node.nodeValue = original;
+                } else if (translationCache[targetLang] && translationCache[targetLang][original] !== undefined) {
+                    node.nodeValue = translationCache[targetLang][original];
+                } else {
+                    pending.push(node);
+                }
+            });
+            isApplyingTranslation = false;
+
+            if (targetLang === 'en' || pending.length === 0) {
+                if (onProgress) onProgress(1);
+                return;
+            }
+
+            let completed = 0;
+            await runWithConcurrency(pending, 6, async node => {
+                const original = originalTextByNode.get(node);
+                try {
+                    const translated = await translateOneString(original, targetLang);
+                    if (translationGeneration === myGeneration) {
+                        isApplyingTranslation = true;
+                        node.nodeValue = translated;
+                        isApplyingTranslation = false;
+                    }
+                } catch (e) {
+                    // Leave the original English in place rather than
+                    // breaking the row — a partial translation is far
+                    // better than a crashed page.
+                } finally {
+                    completed += 1;
+                    if (onProgress) onProgress(completed / pending.length);
+                }
+            });
+            persistTranslationCache();
         }
 
         function GoogleTranslate() {
-            const [selectedLang, setSelectedLang] = React.useState('en');
-            const [status, setStatus] = React.useState('loading'); // loading | ready | error
+            const [selectedLang, setSelectedLang] = React.useState(() => localStorage.getItem('carenet_lang') || 'en');
+            const [status, setStatus] = React.useState('idle'); // idle | translating | ready | error
+            const selectedLangRef = React.useRef(selectedLang);
 
-            React.useEffect(() => {
-                let cancelled = false;
-                let attempts = 0;
-                const maxAttempts = 100; // ~20s, generous for slow connections
-                const interval = setInterval(() => {
-                    if (cancelled) return;
-                    attempts += 1;
-                    const combo = document.querySelector('#google_translate_element select.goog-te-combo') || document.querySelector('.goog-te-combo');
-                    if (combo && combo.options && combo.options.length > 1) {
-                        setStatus('ready');
-                        clearInterval(interval);
-                    } else if (attempts >= maxAttempts) {
-                        setStatus('error');
-                        clearInterval(interval);
-                    }
-                }, 200);
-                return () => { cancelled = true; clearInterval(interval); };
+            React.useEffect(() => { selectedLangRef.current = selectedLang; }, [selectedLang]);
+
+            const applyLanguage = React.useCallback(async (langCode) => {
+                setSelectedLang(langCode);
+                localStorage.setItem('carenet_lang', langCode);
+                setStatus(langCode === 'en' ? 'idle' : 'translating');
+                try {
+                    await applyTranslationToPage(langCode, progress => {
+                        if (progress >= 1) setStatus(langCode === 'en' ? 'idle' : 'ready');
+                    });
+                } catch (e) {
+                    setStatus('error');
+                }
             }, []);
 
-            const applyLanguage = (langCode) => {
-                setSelectedLang(langCode);
-                setGoogTransCookie(langCode);
+            // Re-apply the saved language on first load (covers refresh),
+            // and keep translating newly-rendered content (new patient
+            // rows, tab switches, etc.) as the app updates.
+            React.useEffect(() => {
+                if (selectedLangRef.current !== 'en') applyLanguage(selectedLangRef.current);
 
-                let attempts = 0;
-                const trigger = () => {
-                    attempts += 1;
-                    const combo = document.querySelector('#google_translate_element select.goog-te-combo') || document.querySelector('.goog-te-combo');
-                    if (combo) {
-                        combo.value = langCode;
-                        combo.dispatchEvent(new Event('change', { bubbles: true }));
-                        return true;
-                    }
-                    return false;
-                };
-
-                if (trigger()) return;
-
-                // Widget wasn't ready yet (rare race on first click) — keep
-                // retrying briefly instead of silently doing nothing.
-                const interval = setInterval(() => {
-                    attempts += 1;
-                    if (trigger() || attempts > 50) clearInterval(interval);
-                }, 150);
-            };
+                const root = document.getElementById('root');
+                if (!root) return;
+                let debounceTimer = null;
+                const observer = new MutationObserver(() => {
+                    if (isApplyingTranslation || selectedLangRef.current === 'en') return;
+                    clearTimeout(debounceTimer);
+                    debounceTimer = setTimeout(() => {
+                        applyTranslationToPage(selectedLangRef.current).catch(() => {});
+                    }, 400);
+                });
+                observer.observe(root, { childList: true, subtree: true, characterData: true });
+                return () => { observer.disconnect(); clearTimeout(debounceTimer); };
+            }, [applyLanguage]);
 
             return (
                 <div className="flex items-center justify-center mt-2 md:mt-0">
-                    <div className="lang-select-box notranslate shadow-sm" title={status === 'error' ? 'Translation service unavailable — check your internet connection' : ''}>
-                        <i className={`fa-solid ${status === 'error' ? 'fa-triangle-exclamation text-amber-500' : 'fa-globe text-emerald-600 dark:text-emerald-400'}`}></i>
+                    <div className="lang-select-box notranslate shadow-sm" title={status === 'error' ? 'Some text could not be translated — check your internet connection' : ''}>
+                        <i className={`fa-solid ${
+                            status === 'error' ? 'fa-triangle-exclamation text-amber-500' :
+                            status === 'translating' ? 'fa-spinner fa-spin text-emerald-600 dark:text-emerald-400' :
+                            'fa-globe text-emerald-600 dark:text-emerald-400'
+                        }`}></i>
                         <span className="hidden sm:inline text-xs font-bold text-slate-500 dark:text-slate-400">Language:</span>
                         <select
                             value={selectedLang}
                             onChange={(e) => applyLanguage(e.target.value)}
                             aria-label="Select language"
-                            disabled={status !== 'ready'}
                         >
                             {LANGUAGE_OPTIONS.map(l => (
                                 <option key={l.code} value={l.code}>{l.label}</option>
                             ))}
                         </select>
                     </div>
-                    <div id="google_translate_element"></div>
                 </div>
             );
         }
@@ -644,35 +729,6 @@
                     localStorage.setItem('carenet_patients_offline', JSON.stringify(patients));
                 }
             }, [patients, dbStatusType]);
-
-            React.useEffect(() => {
-                const loadTranslateScript = () => {
-                    window.googleTranslateElementInit = () => {
-                        new window.google.translate.TranslateElement({
-                            pageLanguage: 'en',
-                            includedLanguages: 'ta,en,hi,te',
-                            layout: window.google.translate.TranslateElement.InlineLayout.SIMPLE
-                        }, 'google_translate_element');
-                    };
-                    const script = document.createElement('script');
-                    script.src = "https://translate.google.com/translate_a/element.js?cb=googleTranslateElementInit";
-                    script.async = true;
-                    script.onerror = () => {
-                        // One retry after a short delay covers transient
-                        // network blips without looping forever.
-                        if (!window.__translateRetried) {
-                            window.__translateRetried = true;
-                            script.remove();
-                            setTimeout(loadTranslateScript, 2000);
-                        }
-                    };
-                    document.body.appendChild(script);
-                };
-
-                if (!document.querySelector('script[src*="translate.google.com/translate_a/element.js"]')) {
-                    loadTranslateScript();
-                }
-            }, []);
 
             const handleLogin = (e) => {
                 e.preventDefault();

@@ -134,6 +134,15 @@
             };
         })();
 
+        // Default Camp Info shown on the Home / About section.
+        // Admins can override these values live from the Admin Control Panel -> Camp Settings tab.
+        const defaultCampSettings = {
+            date: "Every Saturday & Sunday",
+            timing: "9:00 AM – 4:00 PM",
+            venue: "Community Hall, Camp Grounds",
+            mapUrl: ""
+        };
+
         const defaultUsers = [
             { id: 'u1', email: 'admin@ngo.com', pass: 'admin123', role: 'Admin', name: 'Super Admin' },
             { id: 'u2', email: 'vol@ngo.com', pass: 'vol123', role: 'Volunteer', name: 'Main Volunteer' },
@@ -606,6 +615,7 @@
             // Data State
             const [users, setUsers] = React.useState(() => getInitialState('carenet_users', defaultUsers));
             const [patients, setPatients] = React.useState([]); 
+            const [campSettings, setCampSettings] = React.useState(() => getInitialState('carenet_campSettings', defaultCampSettings));
             const [currentUser, setCurrentUser] = React.useState(() => getInitialState('carenet_currentUser', null));
             const [myPatientId, setMyPatientId] = React.useState(() => getInitialState('carenet_myPatientId', null));
             
@@ -647,6 +657,7 @@
             React.useEffect(() => localStorage.setItem('carenet_users', JSON.stringify(users)), [users]);
             React.useEffect(() => localStorage.setItem('carenet_currentUser', JSON.stringify(currentUser)), [currentUser]);
             React.useEffect(() => localStorage.setItem('carenet_myPatientId', JSON.stringify(myPatientId)), [myPatientId]);
+            React.useEffect(() => localStorage.setItem('carenet_campSettings', JSON.stringify(campSettings)), [campSettings]);
 
             // Handle Dark Mode
             React.useEffect(() => {
@@ -656,12 +667,13 @@
 
             React.useEffect(() => {
                 let unsubscribe = null;
+                let unsubscribeSettings = null;
 
                 const initFirebase = async () => {
                     try {
                         const { initializeApp } = await import("https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js");
                         const { getAuth, signInAnonymously } = await import("https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js");
-                        const { getFirestore, onSnapshot, collection } = await import("https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js");
+                        const { getFirestore, onSnapshot, collection, doc } = await import("https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js");
                         
                         const firebaseConfig = {
                             apiKey: "AIzaSyAF618lKOOC94WIJgIr2P93txBQEb1ELaQ",
@@ -704,6 +716,17 @@
                             console.error("Firebase Snapshot error:", error);
                         });
 
+                        // Realtime reactive listener for admin-editable Camp Settings (date/timing/venue/map link).
+                        // Any update the Admin makes syncs instantly to every visitor's Home page.
+                        const settingsRef = doc(database, 'artifacts', targetAppId, 'public', 'data', 'settings', 'campInfo');
+                        unsubscribeSettings = onSnapshot(settingsRef, (snap) => {
+                            if (snap.exists()) {
+                                setCampSettings(prev => ({ ...prev, ...snap.data() }));
+                            }
+                        }, (error) => {
+                            console.error("Firebase Camp Settings Snapshot error:", error);
+                        });
+
                         setIsDbReady(true);
                         setDbStatusText("Cloud Database Connected Successfully!");
                         setDbStatusType("success");
@@ -723,6 +746,7 @@
 
                 return () => {
                     if (unsubscribe) unsubscribe();
+                    if (unsubscribeSettings) unsubscribeSettings();
                 };
             }, []);
 
@@ -891,6 +915,36 @@
             const removeUser = (id) => {
                 setUsers(users.filter(u => u.id !== id));
                 showMsg("User removed from system.", 'info');
+            };
+
+            // Admin-only: update Camp Date, Timings, Venue and Google Maps link.
+            // Saves to Firestore (so it's visible/synced on every device's Home page instantly);
+            // falls back to local state/localStorage if the cloud DB isn't reachable.
+            const handleUpdateCampSettings = async (e) => {
+                e.preventDefault();
+                const fd = new FormData(e.target);
+                const updatedSettings = {
+                    date: fd.get('campDate').trim(),
+                    timing: fd.get('campTiming').trim(),
+                    venue: fd.get('campVenue').trim(),
+                    mapUrl: fd.get('campMapUrl').trim()
+                };
+
+                try {
+                    if (db) {
+                        const { doc, setDoc } = await import("https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js");
+                        const docRef = doc(db, 'artifacts', 'medcamp-6a0f8', 'public', 'data', 'settings', 'campInfo');
+                        await setDoc(docRef, updatedSettings, { merge: true });
+                        // Local state updates automatically via the realtime onSnapshot listener above.
+                    } else {
+                        setCampSettings(updatedSettings);
+                    }
+                    showMsg("Camp details updated! Changes are now live on the Home page.", 'success');
+                } catch (error) {
+                    console.error(error);
+                    setCampSettings(updatedSettings);
+                    showMsg("Saved locally. Cloud sync failed — check your connection.", 'warning');
+                }
             };
 
             const handleVolunteerScan = async (qrData) => {
@@ -1358,17 +1412,27 @@
                                         <div className="bg-emerald-50 dark:bg-emerald-950/20 border border-emerald-100 dark:border-emerald-900/50 rounded-2xl p-5 text-center">
                                             <i className="fa-solid fa-calendar-days text-emerald-600 dark:text-emerald-400 text-2xl mb-2"></i>
                                             <p className="text-xs font-bold uppercase text-slate-400 mb-1">Camp Date</p>
-                                            <p className="font-bold text-slate-800 dark:text-white text-sm">Every Saturday & Sunday</p>
+                                            <p className="font-bold text-slate-800 dark:text-white text-sm">{campSettings.date}</p>
                                         </div>
                                         <div className="bg-blue-50 dark:bg-blue-950/20 border border-blue-100 dark:border-blue-900/50 rounded-2xl p-5 text-center">
                                             <i className="fa-solid fa-clock text-blue-600 dark:text-blue-400 text-2xl mb-2"></i>
                                             <p className="text-xs font-bold uppercase text-slate-400 mb-1">Timings</p>
-                                            <p className="font-bold text-slate-800 dark:text-white text-sm">9:00 AM – 4:00 PM</p>
+                                            <p className="font-bold text-slate-800 dark:text-white text-sm">{campSettings.timing}</p>
                                         </div>
                                         <div className="bg-amber-50 dark:bg-amber-950/20 border border-amber-100 dark:border-amber-900/50 rounded-2xl p-5 text-center">
                                             <i className="fa-solid fa-location-dot text-amber-600 dark:text-amber-400 text-2xl mb-2"></i>
                                             <p className="text-xs font-bold uppercase text-slate-400 mb-1">Venue</p>
-                                            <p className="font-bold text-slate-800 dark:text-white text-sm">Community Hall, Camp Grounds</p>
+                                            <p className="font-bold text-slate-800 dark:text-white text-sm">{campSettings.venue}</p>
+                                            {campSettings.mapUrl && (
+                                                <a
+                                                    href={campSettings.mapUrl}
+                                                    target="_blank"
+                                                    rel="noopener noreferrer"
+                                                    className="mt-2 inline-flex items-center text-amber-600 dark:text-amber-400 text-xs font-bold underline hover:text-amber-700 dark:hover:text-amber-300"
+                                                >
+                                                    View on Map <i className="fa-solid fa-arrow-up-right-from-square ml-1"></i>
+                                                </a>
+                                            )}
                                         </div>
                                         <div className="bg-rose-50 dark:bg-rose-950/20 border border-rose-100 dark:border-rose-900/50 rounded-2xl p-5 text-center">
                                             <i className="fa-solid fa-hand-holding-medical text-rose-600 dark:text-rose-400 text-2xl mb-2"></i>
@@ -1591,7 +1655,8 @@
                                         {[
                                             { key: 'overview', label: 'Dashboard', icon: 'fa-gauge-high' },
                                             { key: 'analytics', label: 'Analytics', icon: 'fa-chart-pie' },
-                                            { key: 'reports', label: 'Reports', icon: 'fa-file-export' }
+                                            { key: 'reports', label: 'Reports', icon: 'fa-file-export' },
+                                            { key: 'settings', label: 'Camp Settings', icon: 'fa-campground' }
                                         ].map(tab => (
                                             <button
                                                 key={tab.key}
@@ -1686,6 +1751,38 @@
                                                     ))}
                                                 </div>
                                             </div>
+                                        </div>
+                                    </div>
+                                )}
+
+                                {/* ---- TAB: CAMP SETTINGS ---- */}
+                                {adminTab === 'settings' && (
+                                    <div className="space-y-6 animate-fade-in">
+                                        <div className="bg-white dark:bg-slate-800 p-6 md:p-8 rounded-2xl border dark:border-slate-700 shadow-sm max-w-2xl">
+                                            <h3 className="font-bold text-lg mb-2 flex items-center"><i className="fa-solid fa-campground mr-2 text-emerald-500"></i> Edit Camp Date, Timings & Venue</h3>
+                                            <p className="text-sm text-slate-500 mb-6">These details are shown to everyone in the "About This Medical Camp" section on the Home page. Updates here go live instantly for all visitors.</p>
+                                            <form onSubmit={handleUpdateCampSettings} className="space-y-4">
+                                                <div>
+                                                    <label className="block text-xs font-bold text-slate-400 uppercase mb-1.5">Camp Date</label>
+                                                    <input required name="campDate" type="text" defaultValue={campSettings.date} placeholder="e.g. Every Saturday & Sunday" className="w-full px-4 py-3 border dark:border-slate-600 rounded-xl bg-slate-50 dark:bg-slate-900 text-sm outline-none focus:ring-2 focus:ring-emerald-500" />
+                                                </div>
+                                                <div>
+                                                    <label className="block text-xs font-bold text-slate-400 uppercase mb-1.5">Timings</label>
+                                                    <input required name="campTiming" type="text" defaultValue={campSettings.timing} placeholder="e.g. 9:00 AM – 4:00 PM" className="w-full px-4 py-3 border dark:border-slate-600 rounded-xl bg-slate-50 dark:bg-slate-900 text-sm outline-none focus:ring-2 focus:ring-emerald-500" />
+                                                </div>
+                                                <div>
+                                                    <label className="block text-xs font-bold text-slate-400 uppercase mb-1.5">Venue</label>
+                                                    <input required name="campVenue" type="text" defaultValue={campSettings.venue} placeholder="e.g. Community Hall, Camp Grounds" className="w-full px-4 py-3 border dark:border-slate-600 rounded-xl bg-slate-50 dark:bg-slate-900 text-sm outline-none focus:ring-2 focus:ring-emerald-500" />
+                                                </div>
+                                                <div>
+                                                    <label className="block text-xs font-bold text-slate-400 uppercase mb-1.5">Google Maps Link (optional)</label>
+                                                    <input name="campMapUrl" type="url" defaultValue={campSettings.mapUrl} placeholder="https://maps.google.com/?q=..." className="w-full px-4 py-3 border dark:border-slate-600 rounded-xl bg-slate-50 dark:bg-slate-900 text-sm outline-none focus:ring-2 focus:ring-emerald-500" />
+                                                    <p className="text-xs text-slate-400 mt-1.5">Paste a Google Maps share link. A clickable "View on Map" link will appear next to the Venue on the Home page.</p>
+                                                </div>
+                                                <button type="submit" className="w-full py-3.5 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-xl shadow-lg transition flex items-center justify-center">
+                                                    <i className="fa-solid fa-floppy-disk mr-2"></i> Save & Publish to Home Page
+                                                </button>
+                                            </form>
                                         </div>
                                     </div>
                                 )}
